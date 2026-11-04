@@ -80,6 +80,7 @@ void Game::driveAI(Car& c, float dt) {
             float sideRoom = o.lat > 0 ? -1.0f : 1.0f;
             avoidTarget = sideRoom * 3.6f;
             if (ds < 9 && o.speed() < v) slow = 0.97f;
+            if (ds < 7 && fabsf(dl) < 2.2f) slow = fminf(slow, 0.92f);
         }
     }
     c.avoid = approach(c.avoid, avoidTarget, 1.5f, dt);

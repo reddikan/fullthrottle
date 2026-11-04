@@ -181,6 +181,11 @@ static void setCommon(Prog& p, V3 cam, float flash, const M4& vp) {
     glUniform1f(p.U("u_fogD"), kFog);
 }
 
+static float carFade(const Game& g, int i) {
+    if (i == g.player || g.state == State::Title) return 1.0f;
+    V3 d = g.cars[i].pos - g.camPos; d.y = 0;
+    return smooth(2.8f, 6.5f, len(d));
+}
 static M4 carModel(const Car& c) {
     float roll = clampf(c.yawRate * c.speed() * 0.0035f, -0.06f, 0.06f);
     float pitch = clampf(-c.throttle * 0.012f + c.brake * 0.02f, -0.03f, 0.03f);
@@ -213,6 +218,7 @@ void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
     // static world
     setCommon(pWorld, cam, flash, vp);
     glUniform1f(pWorld.U("u_clip"), reflection ? 1.0f : 0.0f);
+    glUniform1f(pWorld.U("u_fade"), 1.0f);
     glUniformMatrix4fv(pWorld.U("u_model"), 1, GL_FALSE, I.m);
     glBindVertexArray(vaoWorld);
     glDrawArrays(GL_TRIANGLES, 0, nWorld);
@@ -249,8 +255,12 @@ void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
     setCommon(pWorld, cam, flash, vp);
     glUniform1f(pWorld.U("u_clip"), reflection ? 1.0f : 0.0f);
     glBindVertexArray(vaoCar);
-    for (auto& c : g.cars) {
+    for (size_t ci = 0; ci < g.cars.size(); ci++) {
+        const Car& c = g.cars[ci];
         if (len(c.pos - g.camPos) > 900) continue;
+        float fade = reflection ? 1.0f : carFade(g, (int)ci);
+        if (fade <= 0.02f) continue;
+        glUniform1f(pWorld.U("u_fade"), fade);
         M4 m = carModel(c);
         glUniformMatrix4fv(pWorld.U("u_model"), 1, GL_FALSE, m.m);
         glUniform3f(pWorld.U("u_p1"), c.liv.c1.x, c.liv.c1.y, c.liv.c1.z);
@@ -258,6 +268,7 @@ void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
         glUniform3f(pWorld.U("u_p3"), c.liv.c3.x, c.liv.c3.y, c.liv.c3.z);
         glDrawArrays(GL_TRIANGLES, 0, nCar);
     }
+    glUniform1f(pWorld.U("u_fade"), 1.0f);
 
     // text: signs and decals
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -266,6 +277,7 @@ void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
     glUniform1i(pText.U("u_font"), 0);
     glBindTexture(GL_TEXTURE_2D, fontTex);
     glUniform1f(pText.U("u_outline"), 0.0f);
+    glUniform1f(pText.U("u_fade"), 1.0f);
     glUniformMatrix4fv(pText.U("u_model"), 1, GL_FALSE, I.m);
     glBindVertexArray(vaoText);
     glDrawArrays(GL_TRIANGLES, 0, nText);
@@ -274,6 +286,9 @@ void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
     for (size_t i = 0; i < g.cars.size(); i++) {
         const Car& c = g.cars[i];
         if (len(c.pos - g.camPos) > 250) continue;
+        float fade = reflection ? 1.0f : carFade(g, (int)i);
+        if (fade <= 0.02f) continue;
+        glUniform1f(pText.U("u_fade"), fade);
         M4 m = carModel(c);
         glUniformMatrix4fv(pText.U("u_model"), 1, GL_FALSE, m.m);
         glDrawArrays(GL_TRIANGLES, geo.carTextStart[i], geo.carTextCount[i]);

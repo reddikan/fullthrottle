@@ -49,7 +49,7 @@ void main() {
 static const char* kWorldFS = R"(
 in vec3 v_world; in vec3 v_nrm; in vec4 v_col; in float v_aux; in vec3 v_local;
 uniform vec3 u_cam; uniform float u_clip; uniform float u_fogD;
-uniform vec3 u_p1; uniform vec3 u_p2; uniform vec3 u_p3;
+uniform vec3 u_p1; uniform vec3 u_p2; uniform vec3 u_p3; uniform float u_fade;
 out vec4 o;
 vec3 livery(vec3 p, vec3 N) {
     vec3 c = u_p1;
@@ -63,6 +63,7 @@ vec3 livery(vec3 p, vec3 N) {
 }
 void main() {
     if (u_clip > 0.5 && v_world.y < -0.02) discard;
+    if (u_fade < 0.999 && hash12(floor(gl_FragCoord.xy)) > u_fade) discard;
     vec3 N = normalize(v_nrm);
     if (!gl_FrontFacing) N = -N;
     vec3 base = v_col.rgb;
@@ -134,7 +135,7 @@ void main() {
     float puddle = smoothstep(0.58, 0.78, n1 * 0.75 + vnoise(wp * 0.21 + 3.0) * 0.45);
     puddle = max(puddle, smoothstep(u_halfW - 2.6, u_halfW - 0.3, a) * 0.75);
     float rf = 1.0 - smoothstep(8.0, 45.0, dist);
-    vec2 rp = (ripple(wp * 1.1, u_time) + ripple(wp * 1.7 + 5.3, u_time * 1.17) * 0.7) * rf * 0.6;
+    vec2 rp = (ripple(wp * 1.8, u_time) + ripple(wp * 2.7 + 5.3, u_time * 1.17) * 0.7) * rf * 0.5;
     vec2 bump = (vec2(n3, n2) - 0.5) * 0.10 * (1.0 - puddle);
     vec3 N = normalize(vec3(rp.x * 0.45 + bump.x, 1.0, rp.y * 0.45 + bump.y));
     vec3 V = normalize(u_cam - v_world);
@@ -169,10 +170,11 @@ void main() { vec4 wp = u_model * vec4(a_pos, 1.0); v_world = wp.xyz; v_uv = a_u
 )";
 static const char* kTextFS = R"(
 in vec3 v_world; in vec2 v_uv; in vec4 v_col;
-uniform sampler2D u_font; uniform vec3 u_cam; uniform float u_fogD; uniform float u_clip; uniform float u_outline;
+uniform sampler2D u_font; uniform vec3 u_cam; uniform float u_fogD; uniform float u_clip; uniform float u_outline; uniform float u_fade;
 out vec4 o;
 void main() {
     if (u_clip > 0.5 && v_world.y < -0.02) discard;
+    if (u_fade < 0.999 && hash12(floor(gl_FragCoord.xy)) > u_fade) discard;
     float d = texture(u_font, v_uv).r;
     float w = max(fwidth(d) * 0.7, 0.004);
     float fill = smoothstep(0.5 - w, 0.5 + w, d);
