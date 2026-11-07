@@ -166,14 +166,15 @@ static Input readInput(App* a) {
     if (p.left) sx = -1;
     if (p.right) sx = 1;
     in.steer = clampf(sx, -1, 1);
-    float thr = fmaxf(p.gas, p.rtrig);
-    if (p.r1 || p.r2) thr = 1;
-    float brk = fmaxf(p.brake, p.ltrig);
-    if (p.l2 || p.down) brk = fmaxf(brk, 1);
+    // A = gas, B / L2 = brake & reverse, R1 / L1 / R2 = drift (hold), X / Y = boost
+    float thr = p.a ? 1.0f : 0.0f;
+    if (p.up) thr = 1.0f;
+    float brk = fmaxf(p.ltrig, p.brake);
+    if (p.b || p.l2 || p.down) brk = 1.0f;
     in.throttle = clampf(thr, 0, 1);
     in.brake = clampf(brk, 0, 1);
-    in.handbrake = p.l1 || p.b;
-    in.boost = p.a || p.x || p.y;
+    in.handbrake = p.r1 || p.l1 || p.r2 || p.rtrig > 0.4f || p.gas > 0.4f;
+    in.boost = p.x || p.y;
     in.confirmPressed = (p.a && !p.prevA) || p.tap;
     in.startPressed = (p.start && !p.prevStart) || p.back;
     in.selectPressed = p.select && !p.prevSelect;

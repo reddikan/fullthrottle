@@ -4,7 +4,7 @@ An arcade stock-car racer for Android, built for the Retroid Pocket 5.
 
 **Cliffside Coast**: a 4.2 km circuit with a grandstand straight, a lakeside hairpin, esses, a cliff sweeper, a tunnel and a lighthouse hairpin by the sea. Race 16 cars over 3 laps from a rolling start, beating the checkpoint timer as you go. Choose **Sunny** or **Rain** on the title screen.
 
-- Tyre-grip physics with guided arcade drifting: start a slide with L1/B (or brake + steer), steer to hold the angle, and counter-steer to straighten out
+- Planted, stable grip handling. Drifting happens only when you hold the drift button: steer to hold the angle, counter-steer to straighten out
 - Car-to-car and guard-rail collisions with sparks, scrapes and spin-outs
 - Skid marks that stay on the track, tyre smoke, exhaust backfire, drafting and boost
 - Painted liveries, spinning and steering wheels, 6-speed gearbox
@@ -28,11 +28,11 @@ The app is about 1 MB of code plus a 260 KB font; there are no big assets. The m
 
 | Action | Buttons |
 | --- | --- |
-| Accelerate | R2 (analog) or R1 |
-| Brake / reverse | L2 (analog) or D-pad down |
+| Accelerate | A (or D-pad up) |
+| Brake / reverse | B, L2 or D-pad down |
 | Steer | Left stick or D-pad |
-| Drift | L1 or B, or brake + hard steer at speed. Hold steering into the turn to keep sliding |
-| Boost | A, X or Y (meter fills while drifting and at speed) |
+| Drift | Hold R1 (or L1 / R2) and steer into the corner. Counter-steer or let go to straighten out |
+| Boost | X or Y (meter fills while drifting and drafting) |
 | Pause | Start (or Back) |
 | Restart race | Select |
 | Start / race again | A |

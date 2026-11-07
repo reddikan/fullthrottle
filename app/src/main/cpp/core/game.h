@@ -121,14 +121,34 @@ struct AudioParams {
     std::atomic<int> impacts{0}, thunders{0}, shifts{0}, backfires{0}, checkpoints{0};
     std::atomic<float> impactPower{1}, thunderPower{1};
 };
+struct SVF {        // Chamberlin state-variable filter
+    float lp = 0, bp = 0;
+    float band(float x, float f, float q) { lp += f * bp; float hp = x - lp - q * bp; bp += f * hp; return bp; }
+    float low(float x, float f, float q) { band(x, f, q); return lp; }
+};
 struct Synth {
-    double ph = 0, ph2 = 0, lfo = 0, sq = 0, cph = 0;
-    float lp1 = 0, lp2 = 0, lp3 = 0, lp4 = 0, hp = 0, eng = 0, engLP = 0, sqLP = 0, scLP = 0, crowdLP = 0;
-    float rpmS = 0, thrS = 0, spdS = 0, skS = 0, boS = 0, nearS = 0, offS = 0, scS = 0, tunS = 0, crS = 0;
-    float impactEnv = 0, impactPow = 1, thunderEnv = 0, thunderDelay = 0, thLP = 0, thLP2 = 0, thPow = 1;
-    float shiftEnv = 0, popEnv = 0, chimeEnv = 0; double chimePh = 0;
-    int seenImpacts = 0, seenThunder = 0, seenShifts = 0, seenPops = 0, seenCp = 0;
     uint32_t seed = 12345;
+    bool initd = false;
+    int rate = 48000;
+    // engine
+    double crank = 0; int nextEv = 0;
+    float cylAmp[8], cylOfs[8];
+    float pulse = 0, rasp = 0, engLP = 0, engLP2 = 0, engDC = 0, popEnv = 0, popTimer = 0;
+    SVF ex1, ex2, ex3, in1, pop1;
+    float comb[4096]; int combPos = 0;
+    // other voices
+    SVF sq1, sq2, sc1, im1, im2, im3, road1, crowd1, wind1, oth1;
+    float brown = 0, scAM = 1, scT = 0;
+    double oph = 0, wowPh = 0, thumpPh = 0, chimePh = 0;
+    // fx
+    float rvA[2400], rvB[2900], rvC[3400]; int ra = 0, rb = 0, rc = 0; float rvLP = 0;
+    float haas[64]; int hpos = 0;
+    float outLP_L = 0, outLP_R = 0;
+    // smoothed params
+    float rpmS = 0, thrS = 0, spdS = 0, skS = 0, boS = 0, nearS = 0, offS = 0, scS = 0, tunS = 0, crS = 0, rainS = 0;
+    float impactEnv = 0, impactPow = 1, thunderEnv = 0, thunderDelay = 0, thLP = 0, thLP2 = 0, thPow = 1;
+    float shiftEnv = 0, bfEnv = 0, chimeEnv = 0;
+    int seenImpacts = 0, seenThunder = 0, seenShifts = 0, seenPops = 0, seenCp = 0;
     void render(AudioParams& p, float* out, int frames, int rate);
 };
 

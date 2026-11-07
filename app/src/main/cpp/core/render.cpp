@@ -693,7 +693,7 @@ void Renderer::draw(Game& g, GLuint target, int outW, int outH) {
     glUniform1f(pComposite.U("u_time"), g.globalTime);
     glUniform1f(pComposite.U("u_flashC"), g.flash * 0.5f);
     glUniform1f(pComposite.U("u_bloom"), rain ? 1.0f : 0.45f);
-    glUniform1f(pComposite.U("u_sat"), rain ? 1.10f : 1.16f);
+    glUniform1f(pComposite.U("u_sat"), rain ? 0.98f : 1.04f);
     float spd = g.cars[g.player].speed();
     glUniform1f(pComposite.U("u_speedFx"), g.state == State::Title ? 0.0f : clampf((spd - 55.0f) / 30.0f, 0, 1) + (g.cars[g.player].boosting ? 0.6f : 0.0f));
     fullscreen(vaoFull);

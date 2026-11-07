@@ -233,14 +233,15 @@ void Game::physics(Car& c, float dt) {
     if (vx < -9 && Fdrive < 0) Fdrive = 0;
 
     // ---- drift state machine
-    bool canBrakeDrift = !c.ai && !autopilot;
-    bool startDrift = (c.handbrake || (canBrakeDrift && c.brake > 0.35f && fabsf(c.steer) > 0.55f)) && vx > 16 && fabsf(c.steer) > 0.2f;
+    // drifting only happens on purpose: hold the drift button and steer
+    bool startDrift = c.handbrake && vx > 16 && fabsf(c.steer) > 0.2f;
     if (startDrift && !c.drifting) { c.drifting = true; c.driftDir = signf(c.steer); c.driftCalm = 0; c.driftHold = 0.3f; }
     c.driftHold = fmaxf(0, c.driftHold - dt);
     if (c.drifting) {
         float into = c.steer * c.driftDir;
-        if (into < 0.15f && !c.handbrake && c.driftHold <= 0) c.driftCalm += dt; else c.driftCalm = 0;
-        if (c.driftCalm > 0.22f || vx < 10 || onGrass) c.drifting = false;
+        bool keep = c.ai || autopilot ? (into > 0.15f || c.handbrake) : c.handbrake;
+        if (!keep && c.driftHold <= 0) c.driftCalm += dt; else c.driftCalm = 0;
+        if (c.driftCalm > 0.12f || vx < 10 || onGrass) c.drifting = false;
     }
     c.driftAmt = approach(c.driftAmt, c.drifting ? 1.0f : sat((fabsf(beta) - 0.08f) / 0.3f) * 0.6f, c.drifting ? 5.0f : 3.0f, dt);
 
@@ -251,13 +252,13 @@ void Game::physics(Car& c, float dt) {
         float into = c.steer * c.driftDir;
         float pathRate = -c.steer * aLat / fmaxf(v, 8.0f) * 1.12f;
         vh += pathRate * dt;
-        float betaT = c.driftDir * (0.32f + 0.32f * sat(into)) * (c.handbrake ? 1.15f : 1.0f);
+        float betaT = c.driftDir * clampf(0.30f + 0.32f * into, 0.04f, 0.62f);   // counter-steer straightens
         float yawT = vh - betaT;
         float err = wrapAngle(yawT - c.yaw);
         c.yawRate = approach(c.yawRate, err * 7.0f + pathRate, 10.0f, dt);
         c.yaw = wrapAngle(c.yaw + c.yawRate * dt);
         float spd = v;
-        float scrub = 2.2f + 3.0f * fabsf(beta) + (c.handbrake ? 6.0f : 0.0f);
+        float scrub = 2.0f + 2.6f * fabsf(beta) + (c.driftHold > 0 ? 5.0f : 0.0f);
         spd += (Fdrive * 0.55f / kMass - scrub - Fbrake / kMass - kDrag * v * v / kMass) * dt;
         spd = fmaxf(spd, 0.0f);
         c.vel = V3(sinf(vh), 0, cosf(vh)) * spd;
@@ -268,9 +269,10 @@ void Game::physics(Car& c, float dt) {
         c.slideSpeed = fabsf(dot(c.vel, c.left())) + 4.0f;
     } else {
         // ---- tyre model
-        float steerMax = 0.58f / (1.0f + vabs / 17.0f) + 0.05f;
+        bool human = !c.ai && !autopilot;
+        float steerMax = human ? 0.50f / (1.0f + vabs / 13.0f) + 0.035f : 0.58f / (1.0f + vabs / 17.0f) + 0.05f;
         float target = -c.steer * steerMax;
-        if (vabs > 6) target += clampf(beta, -0.5f, 0.5f) * (c.ai ? 0.8f : 0.6f);   // counter-steer assist
+        if (vabs > 6) target += clampf(beta, -0.5f, 0.5f) * (human ? 0.9f : 0.8f);   // counter-steer assist
         c.steerAngle = approach(c.steerAngle, clampf(target, -0.6f, 0.6f), 9.0f, dt);
         float d = c.steerAngle;
         float df = kDownforce * v * v;
@@ -279,6 +281,7 @@ void Game::physics(Car& c, float dt) {
         Wf = fmaxf(Wf, 1000.0f); Wr = fmaxf(Wr, 1000.0f);
         float muF = 1.62f * surf, muR = 1.62f * surf;
         if (c.ai) { muF *= 1.04f; muR *= 1.08f; }
+        if (human) { muF *= 1.06f; muR *= 1.28f; }   // planted rear: no fishtailing
         if (c.driftHold > 0) muR *= 0.6f;
         float sv = fmaxf(vabs, 3.0f);
         float af = atan2f(vy + kA * w, sv) - d * (vx >= 0 ? 1.0f : -1.0f);
@@ -290,7 +293,7 @@ void Game::physics(Car& c, float dt) {
         FxF = clampf(FxF, -FfMax * 0.95f, FfMax * 0.95f);
         FxR = clampf(FxR, -FrMax * 0.95f, FrMax * 0.95f);
         float combF = sqrtf(fmaxf(0.3f, 1.0f - 0.35f * (FxF * FxF) / (FfMax * FfMax)));
-        float combR = sqrtf(fmaxf(0.3f, 1.0f - 0.35f * (FxR * FxR) / (FrMax * FrMax)));
+        float combR = sqrtf(fmaxf(0.3f, 1.0f - (human ? 0.12f : 0.35f) * (FxR * FxR) / (FrMax * FrMax)));
         float FyF = -FfMax * pacejka(af) * combF;
         float FyR = -FrMax * pacejka(ar) * combR;
         c.slipF = fabsf(af); c.slipR = fabsf(ar);
@@ -303,8 +306,14 @@ void Game::physics(Car& c, float dt) {
             w = lerpf(wKin, w, vabs / 5.0f);
             Fcy *= vabs / 5.0f;
         }
-        tq -= w * 1400.0f;
-        if (vx > 8) tq += clampf(beta, -0.6f, 0.6f) * (c.ai || autopilot ? 16000.0f : 9000.0f);   // stability assist
+        tq -= w * (human ? 2600.0f : 1400.0f);
+        if (vx > 8) tq += clampf(beta, -0.6f, 0.6f) * (human ? 26000.0f : 16000.0f);   // stability assist
+        if (human && vx > 8 && fabsf(beta) > 0.10f) tq += signf(beta) * (fabsf(beta) - 0.10f) * 60000.0f;  // catch slides
+        if (human && vabs > 8) {
+            // yaw-rate limiter: never rotate faster than the tyres could carry the car
+            float wMax = (1.9f * kG + kDownforce * v * v / kMass) / vabs * 1.05f;
+            if (fabsf(w) > wMax) w = signf(w) * lerpf(fabsf(w), wMax, 0.25f);
+        }
         V3 F = f * Fcx + l * Fcy;
         float dragK = kDrag * (1.0f - c.draft * 0.32f);
         if (v > 0.01f) F -= c.vel * ((dragK * v * v + (onGrass ? 4000.0f : 250.0f)) / v);
@@ -619,7 +628,9 @@ void Game::step(float dt, const Input& in) {
         Car& c = cars[i];
         if (rolling) formation(c, dt);
         else if ((int)i == player && state == State::Race && !autopilot) {
-            c.steer = in.steer; c.throttle = in.throttle; c.brake = in.brake;
+            float rate = fabsf(in.steer) < fabsf(c.steer) ? 12.0f : 6.5f;   // return to centre faster than turn-in
+            c.steer = approach(c.steer, in.steer, rate, dt);
+            c.throttle = in.throttle; c.brake = in.brake;
             c.handbrake = in.handbrake;
             c.boosting = in.boost && c.boost > 0.02f;
         } else if (racing) {
@@ -652,13 +663,6 @@ void Game::update(float dt, const Input& in) {
             if (stateTime >= 3.6f) {
                 state = State::Race; stateTime = 0;
                 banner("GO!", "", 1.2f, 1);
-                // confetti over the straight
-                for (int i = 0; i < 700; i++) {
-                    float s = frand() * 260.0f - 20.0f;
-                    V3 p = track.at(s, (frand() - 0.5f) * 2 * (track.halfW + 2)) + V3(0, 2 + frand() * 12, 0);
-                    const V3 cc[6] = {V3(1, 0.2f, 0.3f), V3(0.2f, 0.9f, 0.4f), V3(0.2f, 0.6f, 1), V3(1, 0.85f, 0.1f), V3(1, 0.4f, 0.9f), V3(0.3f, 1, 0.9f)};
-                    spawn(P_CONFETTI, p, V3(0, -1, 0), 40.0f, 0.22f + frand() * 0.12f, 0, 1, cc[i % 6]);
-                }
                 for (auto& c : cars) { c.lapStart = 0; }
             }
             break;

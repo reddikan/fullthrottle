@@ -141,6 +141,19 @@ void main() {
     else if (mat == 14) { base = u_rim; gloss = 1.0; spPow = 70.0; envAmt = 0.3; }
     else if (mat == 15) { gloss = 0.7; spPow = 60.0; envAmt = 0.18; }
 
+    // grime: blotches and rain streaks on man-made surfaces, dirt on car lower bodies
+    if (mat == 3 || mat == 9 || mat == 11 || mat == 15 || mat == 0) {
+        float g = vnoise(v_world.xz * 0.35 + v_world.y * 0.2) * 0.6 + vnoise(vec2((v_world.x + v_world.z) * 3.0, v_world.y * 0.25)) * 0.4;
+        float low = 1.0 - smoothstep(0.0, 2.5, v_world.y);
+        base *= 1.0 - (smoothstep(0.45, 0.85, g) * 0.28 + low * 0.12);
+    }
+    if (mat == 1) {
+        float d = (1.0 - smoothstep(0.15, 0.75, v_local.y)) * (0.55 + 0.45 * vnoise(v_local.xz * 6.0 + v_local.y * 4.0));
+        d += (1.0 - smoothstep(-2.6, -1.9, v_local.z)) * 0.25 * vnoise(v_local.xy * 8.0);
+        base = mix(base, vec3(0.34, 0.30, 0.24), clamp(d, 0.0, 1.0) * 0.45);
+        gloss *= 1.0 - clamp(d, 0.0, 1.0) * 0.6;
+    }
+    if (mat == 4) base *= 0.9 + 0.2 * texture(u_texA, wxz * 0.6).r;
     float tun = tunnelMask(v_world);
     float ndl = max(dot(N, u_sunDir), 0.0);
     if (mat == 12) ndl = ndl * 0.7 + 0.3 * max(dot(-N, u_sunDir), 0.0) + 0.15;  // leaves: soft wrap light
@@ -196,7 +209,12 @@ void main() {
     // asphalt with aggregate grain
     float g1 = texture(u_texA, wp * 0.42).r, g2 = texture(u_texA, wp * 0.09).r;
     float tone = 0.40 + 0.06 * (vnoise(wp * 0.018) - 0.5) + 0.05 * (vnoise(wp * 0.11) - 0.5);
-    vec3 asph = vec3(tone, tone, tone * 1.04) * (0.80 + 0.32 * mix(g1, 0.5, far * 0.7) + 0.10 * (g2 - 0.5));
+    vec3 asph = vec3(tone, tone, tone * 1.02) * (0.74 + 0.44 * mix(g1, 0.5, far * 0.6) + 0.14 * (g2 - 0.5));
+    // dust and grime build-up toward the edges, oil drips down the middle of the lanes
+    float edgeDirt = smoothstep(u_halfW - 2.5, u_halfW, a) * (0.6 + 0.4 * vnoise(wp * 0.3));
+    asph = mix(asph, vec3(0.46, 0.43, 0.38), edgeDirt * 0.35);
+    float oil = smoothstep(0.72, 0.9, vnoise(wp * 0.45 + 11.0)) * (1.0 - smoothstep(1.2, 2.0, abs(mod(lat + 20.0, 6.67) - 3.33)));
+    asph *= 1.0 - oil * 0.35 * (1.0 - far);
 
     // repair patches (sealed rectangles)
     vec2 pc = vec2(floor((lat + 20.0) / 4.0), floor(s / 11.0));
@@ -495,7 +513,9 @@ out vec4 o;
 float h(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 void main() {
     vec2 uv = v_uv;
-    vec3 c = texture(u_scene, uv).rgb;
+    // slight chromatic fringing toward the edges
+    vec2 off = (uv - 0.5) * 0.0045 * dot(uv - 0.5, uv - 0.5) * 4.0;
+    vec3 c = vec3(texture(u_scene, uv + off).r, texture(u_scene, uv).g, texture(u_scene, uv - off).b);
     // subtle radial speed blur at the screen edges
     if (u_speedFx > 0.01) {
         vec2 dir = (uv - vec2(0.5, 0.55));
@@ -504,12 +524,28 @@ void main() {
     }
     vec3 b = texture(u_bloomA, uv).rgb * 0.55 + texture(u_bloomB, uv).rgb * 0.75;
     c += b * u_bloom;
+    c = mix(c, texture(u_bloomA, uv).rgb * 1.6, 0.06);           // a touch of soft focus
     float l = dot(c, vec3(0.299, 0.587, 0.114));
     c = mix(vec3(l), c, u_sat);
-    c = (c - 0.45) * 1.06 + 0.45;
+    // gritty grade: bleach-bypass blend, warm/olive shadows, firmer contrast
+    vec3 bb = vec3(l) * c * 2.0 * (1.0 - l) + (1.0 - 2.0 * (1.0 - vec3(l)) * (1.0 - c)) * l;
+    c = mix(c, bb, 0.22);
+    c = mix(c * vec3(1.03, 1.02, 0.90), c, smoothstep(0.0, 0.6, l));
+    c = (c - 0.45) * 1.10 + 0.45;
+    c = c * 0.96 + 0.015;
     vec2 q = uv - 0.5;
-    c *= 1.0 - dot(q, q) * 0.45;
-    c += (h(uv * u_res + fract(u_time) * 100.0) - 0.5) * 0.012;
+    c *= 1.0 - dot(q, q) * 0.85;
+    // chunky film grain, stronger in the mids and shadows
+    vec2 gp = floor(uv * u_res / 1.6);
+    float fr = floor(u_time * 24.0);
+    float gr = (h(gp + fr * 17.31) + h(gp * 1.7 + fr * 3.17) - 1.0);
+    c += gr * 0.075 * (1.0 - 0.55 * l);
+    // dust specks and the odd vertical scratch
+    float dust = step(0.9993, h(floor(uv * u_res / 3.0) + fr * 7.7));
+    c = mix(c, vec3(0.08), dust * 0.6);
+    float sx = h(vec2(fr, 3.1));
+    float scratch = step(0.86, h(vec2(fr, 9.4))) * (1.0 - smoothstep(0.0, 1.2 / u_res.x, abs(uv.x - sx)));
+    c += scratch * 0.12 * (0.6 + 0.4 * h(vec2(floor(uv.y * 90.0), fr)));
     c += u_flashC * 0.12;
     o = vec4(clamp(c, 0.0, 1.0), 1.0);
 }

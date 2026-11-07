@@ -110,7 +110,7 @@ void Renderer::drawHud(Game& g) {
         text(">", VW * 0.5f + 200, py + 50, 34, kGold, kGold, 1, 1);
         float blink = 0.45f + 0.55f * (0.5f + 0.5f * sinf(g.globalTime * 4));
         text("PRESS A TO RACE", VW * 0.5f, VH - 120, 40, {1, 1, 1, blink}, {1, 1, 1, blink}, 1, 1, 0.08f);
-        text("R2 GAS    L2 BRAKE    L1 / B DRIFT    A BOOST    START PAUSE", VW * 0.5f, VH - 60, 20, {0.85f, 0.9f, 1, 0.9f}, {0.85f, 0.9f, 1, 0.9f}, 1, 1, 0.06f);
+        text("A GAS    B BRAKE    HOLD R1 + STEER TO DRIFT    X BOOST    START PAUSE", VW * 0.5f, VH - 60, 20, {0.85f, 0.9f, 1, 0.9f}, {0.85f, 0.9f, 1, 0.9f}, 1, 1, 0.06f);
         flushHud(VW, VH, V3(0.03f, 0.06f, 0.18f));
         return;
     }
