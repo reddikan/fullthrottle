@@ -1,14 +1,20 @@
 # Full Throttle
 
-A rainy, low-poly stock-car racer for Android, built for the Retroid Pocket 5.
+An arcade stock-car racer for Android, built for the Retroid Pocket 5.
 
-This first build is a **look test**: one rainy circuit, 8 cars, 3 laps. It includes wet-road reflections, tyre spray, rain streaks, lightning, bloom and procedural engine/rain sound. There's no music.
+**Cliffside Coast**: a 4.2 km circuit with a grandstand straight, a lakeside hairpin, esses, a cliff sweeper, a tunnel and a lighthouse hairpin by the sea. Race 16 cars over 3 laps from a rolling start, beating the checkpoint timer as you go. Choose **Sunny** or **Rain** on the title screen.
+
+- Tyre-grip physics with guided arcade drifting: start a slide with L1/B (or brake + steer), steer to hold the angle, and counter-steer to straighten out
+- Car-to-car and guard-rail collisions with sparks, scrapes and spin-outs
+- Skid marks that stay on the track, tyre smoke, exhaust backfire, drafting and boost
+- Painted liveries, spinning and steering wheels, 6-speed gearbox
+- Procedural engine, tyre, crowd and impact audio. There's no music.
 
 ![screenshot](media/screenshot.png)
 
 ## Install
 
-1. On the Retroid, open the [latest release](../../releases/tag/latest) and download `fullthrottle_v1.apk`.
+1. On the Retroid, open the [latest release](../../releases/tag/latest) and download `fullthrottle_v2.apk`.
 2. Open the file and allow installs from your browser/file manager if Android asks.
 3. Every build is signed with the same key, so new versions install over the old one without losing anything.
 
@@ -25,11 +31,12 @@ The app is about 1 MB of code plus a 260 KB font; there are no big assets. The m
 | Accelerate | R2 (analog) or R1 |
 | Brake / reverse | L2 (analog) or D-pad down |
 | Steer | Left stick or D-pad |
-| Drift | L1 or B (also: brake + hard steer at speed) |
+| Drift | L1 or B, or brake + hard steer at speed. Hold steering into the turn to keep sliding |
 | Boost | A, X or Y (meter fills while drifting and at speed) |
 | Pause | Start (or Back) |
 | Restart race | Select |
 | Start / race again | A |
+| Weather (title screen) | Left / Right |
 
 ## Building
 
@@ -38,14 +45,17 @@ The app is about 1 MB of code plus a 260 KB font; there are no big assets. The m
 
 ```
 g++ -O2 -std=c++17 -Idesktop -DASSET_DIR="\"$PWD/app/src/main/assets\"" desktop/preview.cpp app/src/main/cpp/core/*.cpp -o preview -l:libEGL.so.1 -l:libGLESv2.so.2
-./preview 1920 1080 30 54 out   # writes out.rgba (raw frames) + out.f32 (audio)
+./preview 1920 1080 30 54 out   # writes out.rgba (raw frames) + out.f32 (audio); RAIN=1 for wet, NOHUD=1 to hide the HUD
 ```
 
 ## Code layout
 
 | Path | What |
 | --- | --- |
-| `app/src/main/cpp/core/world.cpp` | Track spline, terrain, trees, barriers, signs, car model |
+| `app/src/main/cpp/core/track.cpp` | Circuit layout and zones |
+| `app/src/main/cpp/core/world.cpp` | Terrain, trees, rails, stands, cliffs, tunnel, signs |
+| `app/src/main/cpp/core/car.cpp` | Car body and wheel models |
+| `app/src/main/cpp/core/hud.cpp` | HUD and livery painting helpers |
 | `app/src/main/cpp/core/game.cpp` | Physics, AI, race flow, camera, spray |
 | `app/src/main/cpp/core/render.cpp` + `shaders.h` | Reflection pass, wet road, sky, bloom, HUD |
 | `app/src/main/cpp/core/audio.cpp` | Engine, rain, spray, thunder synthesis |

@@ -20,10 +20,10 @@ static float bodyTop(float z) {
 static float roofY(float z, float top) {
     // windshield 1.0 -> 0.15, roof to -0.85, fastback rear window to -2.05
     if (z > 1.0f || z < -2.05f) return top;
-    if (z > 0.15f) { float t = (1.0f - z) / 0.85f; return lerpf(top, 1.31f, powf(t, 0.75f)); }
-    if (z > -0.85f) return 1.31f + 0.01f * (1.0f - fabsf(z + 0.35f) / 0.5f);
-    float t = (-0.85f - z) / 1.2f;
-    return lerpf(1.31f, top, powf(t, 1.25f));
+    if (z > 0.20f) { float t = (1.0f - z) / 0.80f; return lerpf(top, 1.30f, powf(t, 0.7f)); }
+    if (z > -0.95f) return 1.30f + 0.012f * (1.0f - fabsf(z + 0.37f) / 0.58f);
+    float t = (-0.95f - z) / 1.10f;
+    return lerpf(1.30f, top, powf(t, 1.4f));
 }
 static float bottomY(float z) {
     float y = 0.15f;
@@ -53,8 +53,8 @@ static void buildBody(MeshBuilder& m) {
         p[3] = V3(w * 1.00f, fmaxf(yb + 0.14f, 0.63f), z);
         p[4] = V3(w * 0.965f, fmaxf(yb + 0.17f, top - 0.09f), z);
         p[5] = V3(w * 0.87f, fmaxf(yb + 0.19f, top), z);
-        float gb = lerpf(w * 0.60f, 0.85f, g);
-        float re = lerpf(w * 0.32f, 0.62f, g);
+        float gb = lerpf(w * 0.60f, 0.88f, g);
+        float re = lerpf(w * 0.32f, 0.72f, g);
         p[6] = V3(gb, top + lerpf(0.02f, 0.015f, g), z);
         p[7] = V3(re, lerpf(top + 0.035f, roof - 0.035f, g), z);
         p[8] = V3(0.0f, lerpf(top + 0.045f, roof, g), z);
@@ -71,6 +71,8 @@ static void buildBody(MeshBuilder& m) {
             N[i * NP + k] += nn; N[i * NP + k + 1] += nn; N[(i + 1) * NP + k + 1] += nn; N[(i + 1) * NP + k] += nn;
         }
     for (auto& nn : N) nn = norm(nn);
+    // make sure normals point outward (left half: +x on the flank)
+    if (N[(NS / 2) * NP + 3].x < 0) for (auto& nn : N) nn = -nn;
     for (int i = 0; i < NS; i++) N[i * NP + 8] = norm(V3(0, N[i * NP + 8].y, N[i * NP + 8].z));
 
     V3 white(1, 1, 1), black(0.04f, 0.04f, 0.045f), glass(0.06f, 0.08f, 0.11f);
@@ -112,8 +114,10 @@ static void buildBody(MeshBuilder& m) {
                 bool flip = (e == 0) ^ (sd < 0);
                 if (flip) m.triN(ctr, b, a, nrm, nrm, nrm, white, M_PAINT); else m.triN(ctr, a, b, nrm, nrm, nrm, white, M_PAINT);
             }
-        V3 a(-0.82f, 0.15f, zs[i]), b(0.82f, 0.15f, zs[i]);
-        m.tri(ctr, a, b, black, M_TRIM); m.tri(ctr, b, a, black, M_TRIM);
+        {   // close the gap along the bottom edge
+            V3 a = at(i, 0), b = a; b.x = -b.x;
+            m.triN(ctr, a, b, nrm, nrm, nrm, white, M_PAINT); m.triN(ctr, b, a, nrm, nrm, nrm, white, M_PAINT);
+        }
     }
 }
 

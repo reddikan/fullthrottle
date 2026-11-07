@@ -65,7 +65,7 @@ void Game::init() {
         l.number = L16[i].number; l.pattern = L16[i].pattern;
     }
     player = 0;
-    skid.assign(9000 * 6, SkidVtx{0, -10, 0, 0, 0});
+    skid.assign(16000 * 6, SkidVtx{0, -10, 0, 0, 0});
     resetRace();
     state = State::Title; stateTime = 0;
 }
@@ -512,7 +512,7 @@ void Game::tyreFx(Car& c, float dt) {
         if (c.brake > 0.8f && v > 25 && front) slip = fmaxf(slip, 6.0f);
         float latPos = fabsf(dot(p - track.P[c.idx], track.R[c.idx]));
         bool onTarmac = latPos < track.halfW + 1.6f;
-        bool skidding = slip > 3.8f && v > 4 && onTarmac;
+        bool skidding = slip > fmaxf(3.8f, 0.11f * v) && v > 4 && onTarmac;
         if (skidding && c.skidOn[w]) {
             float a = clampf((slip - 3.0f) / 9.0f, 0.25f, 0.9f) * (rain ? 0.5f : 1.0f);
             if (len(p - c.skidPrev[w]) > 0.35f) { addSkid(c.skidPrev[w], p, l, 0.30f, a); c.skidPrev[w] = p; }
@@ -521,11 +521,11 @@ void Game::tyreFx(Car& c, float dt) {
         if (!close) continue;
         // tyre smoke (dry) / spray (wet)
         if (skidding && !front && !rain) {
-            c.smokeAcc += dt * (slip - 3.0f) * 3.2f;
+            c.smokeAcc += dt * (slip - 3.0f) * 1.6f;
             while (c.smokeAcc > 1) {
                 c.smokeAcc -= 1;
                 spawn(P_SMOKE, p + V3(0, 0.3f, 0), c.vel * 0.25f + V3((frand() - 0.5f) * 2.0f, 0.6f + frand(), (frand() - 0.5f) * 2.0f),
-                      1.4f + frand() * 1.4f, 0.55f, 2.6f + frand() * 1.5f, 0.32f, V3(0.92f, 0.92f, 0.92f));
+                      1.2f + frand() * 1.2f, 0.5f, 1.9f + frand() * 1.2f, 0.17f, V3(0.80f, 0.80f, 0.82f));
             }
         }
         if (!onTarmac && v > 8 && frand() < dt * v * 1.5f)

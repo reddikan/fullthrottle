@@ -29,19 +29,19 @@ jobs:
       - name: Name the APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk dist/fullthrottle_v1.apk
+          cp app/build/outputs/apk/release/app-release.apk dist/fullthrottle_v2.apk
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fullthrottle_v1
-          path: dist/fullthrottle_v1.apk
+          name: fullthrottle_v2
+          path: dist/fullthrottle_v2.apk
 
       - name: Publish to the "latest" release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/fullthrottle_v1.apk media/*.png \
+          gh release create latest dist/fullthrottle_v2.apk media/*.png \
             --title "Full Throttle (latest build)" \
-            --notes "Look test build. Download fullthrottle_v1.apk on your Retroid Pocket 5 and open it to install. Built from ${GITHUB_SHA::7}."
+            --notes "Full Throttle v2 (Cliffside Coast, 16 cars). Download fullthrottle_v2.apk on your Retroid Pocket 5 and open it to install. Built from ${GITHUB_SHA::7}."

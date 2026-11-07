@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
     game.autopilot = true;
     game.init();
     if (getenv("NOHUD")) game.hideHud = true;
+    if (getenv("RAIN")) game.weather = Weather::Rain;
 
     Target fin; fin.create(W, H, false);
     std::vector<uint8_t> px(W * H * 4);

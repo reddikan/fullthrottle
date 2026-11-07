@@ -170,25 +170,26 @@ static float heightAt(const Track& t, float x, float z, float* sandOut = nullptr
     V3 rel = V3(x, 0, z) - t.P[i];
     float lat = dot(rel, t.R[i]);
     float sand = 0;
-    float flat = t.wallOff + 7.0f;
+    float flat = t.wallOff + 16.0f;
     float h;
-    if (d < flat) h = -0.06f;
+    if (d < flat) h = -0.3f;
     else {
-        float tt = smooth(flat, flat + 80.0f, d);
+        float tt = smooth(flat, flat + 90.0f, d);
         float n = fbm(x * 0.0040f + 11.3f, z * 0.0040f + 7.1f, 4);
         h = powf(n, 1.4f) * 70.0f * tt;
         h += tt * (fbm(x * 0.025f, z * 0.025f, 2) - 0.5f) * 5.0f;
         float far = smooth(380.0f, 800.0f, d);
         h += far * powf(fbm(x * 0.0018f + 40, z * 0.0018f - 13, 4), 1.5f) * 260.0f;
         // embankment that hugs the circuit
-        h += smooth(flat, flat + 10, d) * (1.0f - smooth(flat + 25, flat + 70, d)) * 3.0f * vnoise(x * 0.02f, z * 0.02f);
+        h += smooth(flat, flat + 30, d) * (1.0f - smooth(flat + 35, flat + 80, d)) * 3.0f * vnoise(x * 0.02f, z * 0.02f);
+        h -= 0.3f * (1.0f - smooth(flat, flat + 30, d));
     }
     // cliff side: the hill sits at the cliff top
-    if (t.inZone(s, Z_CLIFF_R) && lat > 0 && d > t.wallOff + 4) h = fmaxf(h, cliffHeight(s) + (d - t.wallOff) * 0.25f);
+    if (t.inZone(s, Z_CLIFF_R) && lat > 0 && d > t.wallOff + 10) h = fmaxf(h, cliffHeight(s) + (d - t.wallOff) * 0.25f);
     // tunnel: hill above
     if (t.inTunnel(s) || t.inTunnel(s - 40) || t.inTunnel(s + 40)) {
         float inT = (t.inTunnel(s) ? 1.0f : 0.6f);
-        if (d > t.halfW + 4.5f) h = fmaxf(h, inT * (10.0f + (d - t.halfW - 4.5f) * 1.2f));
+        if (d > 27.0f) h = fmaxf(h, inT * fminf(9.0f + (d - 27.0f) * 1.3f, 42.0f) * (1.0f - smooth(120.0f, 260.0f, d)));
     }
     // lake basin
     float dl = len(V3(x, 0, z) - V3(t.lakeC.x, 0, t.lakeC.z));
@@ -205,7 +206,7 @@ static float heightAt(const Track& t, float x, float z, float* sandOut = nullptr
 
 static V3 groundColor(float x, float z, float h, float slope, float sand) {
     float n = fbm(x * 0.012f, z * 0.012f, 3);
-    V3 c = lerp(V3(0.30f, 0.62f, 0.16f), V3(0.42f, 0.74f, 0.20f), n);
+    V3 c = lerp(V3(0.28f, 0.56f, 0.17f), V3(0.40f, 0.68f, 0.21f), n);
     c = lerp(c, V3(0.24f, 0.50f, 0.14f), sat(slope * 1.5f - 0.35f));
     c = lerp(c, V3(0.52f, 0.54f, 0.52f), smooth(150.0f, 260.0f, h + n * 40.0f));
     c = lerp(c, V3(0.86f, 0.80f, 0.62f), sand);
@@ -233,7 +234,7 @@ static void billboard(MeshBuilder& m, std::vector<TextVtx>& text, const Font& fo
     V3 rr(face.z, 0, -face.x);  // viewer's right
     V3 up(0, 1, 0);
     V3 c = base + up * (y0 + H * 0.5f);
-    obox(m, c - face * 0.12f, rr, up, face, W * 0.5f + 0.15f, H * 0.5f + 0.15f, 0.1f, V3(0.18f, 0.19f, 0.22f), M_METAL);
+    obox(m, c - face * 0.12f, rr, up, face, W * 0.5f + 0.15f, H * 0.5f + 0.15f, 0.1f, V3(0.52f, 0.54f, 0.58f), M_METAL);
     // front panel
     V3 a = base + up * y0 - rr * (W * 0.5f), b = base + up * y0 + rr * (W * 0.5f);
     V3 f = face * 0.01f;
@@ -291,7 +292,7 @@ static void gantry(MeshBuilder& m, std::vector<TextVtx>& text, const Font& font,
                     V3 p0 = c + rr * x0 + up * ya + f, p1 = c + rr * x1 + up * ya + f, p2 = c + rr * x1 + up * yb + f, p3 = c + rr * x0 + up * yb + f;
                     if (dot(cross(p1 - p0, p3 - p0), nf) > 0) m.quad(p0, p1, p2, p3, col, M_MATTE, 0.1f); else m.quad(p0, p3, p2, p1, col, M_MATTE, 0.1f);
                 }
-            V3 vr = side < 0 ? viewR : -viewR;
+            V3 vr = side < 0 ? -viewR : viewR;
             planeText(text, font, "FULL THROTTLE", c + up * (y0 + 0.35f) + face * (side * 0.6f), vr, up, 1.35f, V3(1, 1, 1), 1, 0.04f);
         }
         // start lights
@@ -307,7 +308,7 @@ static void gantry(MeshBuilder& m, std::vector<TextVtx>& text, const Font& font,
             hazardBanner(m, a, b, y0 + 0.05f, y1 - y0 - 0.1f, nf);
             // black name panel
             V3 pc = c + up * ((y0 + y1) * 0.5f) + face * (side * 0.6f);
-            V3 vr = side < 0 ? viewR : -viewR;
+            V3 vr = side < 0 ? -viewR : viewR;
             V3 p0 = pc - vr * 6.0f - up * 1.0f, p1 = pc + vr * 6.0f - up * 1.0f;
             m.quad(p0, p1, p1 + up * 2.0f, p0 + up * 2.0f, V3(0.04f, 0.04f, 0.05f), M_MATTE);
             if (dot(cross(p1 - p0, up), nf) < 0) m.quad(p0, p0 + up * 2.0f, p1 + up * 2.0f, p1, V3(0.04f, 0.04f, 0.05f));
@@ -449,9 +450,9 @@ void buildWorld(const Track& t, const Font& font, WorldGeo& geo) {
         for (int i = 0; i < 46; i++) {
             float a = 2 * PI * i / 46 + rng.range(-0.05f, 0.05f);
             if (sinf(a) > 0.55f) continue;  // keep the sea view open to the north
-            float r = rng.range(1650, 2100);
+            float r = rng.range(2100, 2700);
             V3 base = ctr + V3(cosf(a) * r, -5, sinf(a) * r);
-            float H = rng.range(220, 480), R = rng.range(220, 360);
+            float H = rng.range(160, 330), R = rng.range(200, 320);
             int sides = 7;
             V3 peak = base + V3(rng.range(-40, 40), H, rng.range(-40, 40));
             V3 rim[7], mid[7];
@@ -462,9 +463,9 @@ void buildWorld(const Track& t, const Font& font, WorldGeo& geo) {
             }
             for (int k = 0; k < sides; k++) {
                 int k2 = (k + 1) % sides;
-                V3 rock(0.50f, 0.52f, 0.56f), snow(0.92f, 0.94f, 0.97f);
+                V3 rock(0.56f, 0.60f, 0.66f), snow(0.92f, 0.94f, 0.97f);
                 m.quad(rim[k], mid[k], mid[k2], rim[k2], rock * rng.range(0.85f, 1.1f), M_ROCK);
-                m.tri(mid[k], peak, mid[k2], H > 380 ? snow : rock * rng.range(0.95f, 1.15f), H > 380 ? M_CONCRETE : M_ROCK);
+                m.tri(mid[k], peak, mid[k2], H > 290 ? snow : rock * rng.range(0.95f, 1.15f), H > 290 ? M_CONCRETE : M_ROCK);
             }
         }
     }

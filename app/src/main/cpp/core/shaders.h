@@ -91,9 +91,10 @@ void main() {
     if (u_fade < 0.999 && hash12(floor(gl_FragCoord.xy)) > u_fade) discard;
     int mat = int(v_aux + 0.5);
     vec3 N = normalize(v_nrm);
-    if (!gl_FrontFacing) N = -N;
-    vec3 base = v_col.rgb;
     vec3 V = normalize(u_cam - v_world);
+    bool smoothBody = (mat == 1 || mat == 2);
+    if (!smoothBody && !gl_FrontFacing) N = -N;
+    vec3 base = v_col.rgb;
     float gloss = 0.0, spPow = 40.0, envAmt = 0.0;
     vec2 wxz = v_world.xz;
     if (mat == 1) {
