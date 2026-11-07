@@ -21,7 +21,7 @@ struct Pad {
     bool left = false, right = false, up = false, down = false;
     bool a = false, b = false, x = false, y = false, l1 = false, r1 = false, l2 = false, r2 = false;
     bool start = false, select = false;
-    bool prevA = false, prevStart = false, prevSelect = false, prevB = false;
+    bool prevA = false, prevStart = false, prevSelect = false, prevB = false, prevL = false, prevR = false;
     bool tap = false, back = false;
 };
 
@@ -172,11 +172,14 @@ static Input readInput(App* a) {
     if (p.l2 || p.down) brk = fmaxf(brk, 1);
     in.throttle = clampf(thr, 0, 1);
     in.brake = clampf(brk, 0, 1);
-    in.drift = p.l1 || p.b;
+    in.handbrake = p.l1 || p.b;
     in.boost = p.a || p.x || p.y;
     in.confirmPressed = (p.a && !p.prevA) || p.tap;
     in.startPressed = (p.start && !p.prevStart) || p.back;
     in.selectPressed = p.select && !p.prevSelect;
+    bool lNow = p.left || p.hatX < -0.5f || p.axX < -0.6f, rNow = p.right || p.hatX > 0.5f || p.axX > 0.6f;
+    in.leftPressed = lNow && !p.prevL; in.rightPressed = rNow && !p.prevR;
+    p.prevL = lNow; p.prevR = rNow;
     p.prevA = p.a; p.prevStart = p.start; p.prevSelect = p.select;
     p.tap = false; p.back = false;
     return in;

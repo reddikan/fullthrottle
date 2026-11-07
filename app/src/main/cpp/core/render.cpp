@@ -1,11 +1,9 @@
-// Renderer: reflection pass, main pass (MSAA), bloom, composite, HUD.
+// Renderer: procedural textures, painted liveries, scene passes, post-processing.
 #include "render.h"
 #include "shaders.h"
 #include <string.h>
 #include <stdio.h>
 #include <algorithm>
-
-void ftLog(const char* fmt, ...);
 
 // ------------------------------------------------------------- GL helpers
 static GLuint compile(GLenum type, const std::string& src) {
@@ -14,10 +12,7 @@ static GLuint compile(GLenum type, const std::string& src) {
     glShaderSource(s, 1, &p, nullptr);
     glCompileShader(s);
     GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[4096]; glGetShaderInfoLog(s, sizeof log, nullptr, log);
-        ftLog("shader compile failed: %s", log);
-    }
+    if (!ok) { char log[4096]; glGetShaderInfoLog(s, sizeof log, nullptr, log); ftLog("shader compile failed: %s", log); }
     return s;
 }
 bool Prog::build(const std::string& vs, const std::string& fs, std::initializer_list<const char*> attribs) {
@@ -68,7 +63,7 @@ void Target::destroy() {
 }
 
 static GLuint makeVao(GLuint& vbo, const void* data, size_t bytes, GLenum usage,
-                      std::initializer_list<std::pair<int, int>> layout /* (components, offsetFloats) */, int strideFloats) {
+                      std::initializer_list<std::pair<int, int>> layout, int strideFloats) {
     GLuint vao; glGenVertexArrays(1, &vao); glBindVertexArray(vao);
     glGenBuffers(1, &vbo); glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, bytes, data, usage);
@@ -80,6 +75,232 @@ static GLuint makeVao(GLuint& vbo, const void* data, size_t bytes, GLenum usage,
     }
     glBindVertexArray(0);
     return vao;
+}
+
+// ------------------------------------------------------------- procedural textures
+static float tnoise(float x, float y, int period, uint32_t seed) {
+    int ix = (int)floorf(x), iy = (int)floorf(y);
+    float fx = x - ix, fy = y - iy;
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+    auto H = [&](int a, int b) { a = ((a % period) + period) % period; b = ((b % period) + period) % period; return hash2(a + seed * 131, b + seed * 71); };
+    return lerpf(lerpf(H(ix, iy), H(ix + 1, iy), fx), lerpf(H(ix, iy + 1), H(ix + 1, iy + 1), fx), fy);
+}
+static float tfbm(float x, float y, int period, uint32_t seed, int oct) {
+    float s = 0, a = 0.5f, t = 0;
+    for (int i = 0; i < oct; i++) { s += tnoise(x, y, period, seed + i) * a; t += a; x *= 2; y *= 2; period *= 2; a *= 0.5f; }
+    return s / t;
+}
+static GLuint uploadTex(const std::vector<uint8_t>& px, int w, int h) {
+    GLuint t; glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    return t;
+}
+void Renderer::makeTextures() {
+    const int N = 256;
+    std::vector<uint8_t> px(N * N * 4);
+    // asphalt aggregate
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float v = 0.5f + (tfbm(x / 32.0f, y / 32.0f, 8, 3, 4) - 0.5f) * 0.5f;
+            float h = hash2(x * 7 + 1, y * 13 + 5);
+            if (h < 0.10f) v += 0.25f * hash2(x, y + 99);
+            else if (h < 0.22f) v -= 0.22f * hash2(x + 7, y);
+            float h2 = hash2(x / 2 + 300, y / 2 + 77);
+            if (h2 < 0.05f) v += 0.18f;
+            uint8_t b = (uint8_t)(clampf(v, 0, 1) * 255);
+            uint8_t* p = &px[(y * N + x) * 4]; p[0] = p[1] = p[2] = b; p[3] = 255;
+        }
+    texAsphalt = uploadTex(px, N, N);
+    // grass
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float v = 0.5f + (tfbm(x / 16.0f, y / 16.0f, 16, 11, 4) - 0.5f) * 0.8f;
+            v += (hash2(x * 3 + 11, y * 5 + 3) - 0.5f) * 0.35f;
+            float clump = tfbm(x / 64.0f, y / 64.0f, 4, 21, 2);
+            v *= 0.8f + 0.4f * clump;
+            uint8_t b = (uint8_t)(clampf(v, 0, 1) * 255);
+            uint8_t* p = &px[(y * N + x) * 4]; p[0] = p[1] = p[2] = b; p[3] = 255;
+        }
+    texGrass = uploadTex(px, N, N);
+    // rock: strata + cracks, tan
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            float n = tfbm(x / 32.0f, y / 32.0f, 8, 31, 5);
+            float strata = 0.5f + 0.5f * sinf(y * 0.18f + n * 9.0f);
+            float crack = fabsf(tfbm(x / 48.0f, y / 24.0f, 5, 41, 3) - 0.5f);
+            float v = 0.62f + 0.22f * (n - 0.5f) * 2 + 0.10f * strata;
+            if (crack < 0.025f) v *= 0.45f + crack * 12;
+            v += (hash2(x + 5, y * 3) - 0.5f) * 0.08f;
+            uint8_t* p = &px[(y * N + x) * 4];
+            p[0] = (uint8_t)(clampf(v * 1.02f, 0, 1) * 255); p[1] = (uint8_t)(clampf(v * 0.98f, 0, 1) * 255); p[2] = (uint8_t)(clampf(v * 0.92f, 0, 1) * 255); p[3] = 255;
+        }
+    texRock = uploadTex(px, N, N);
+    // crowd: one row of spectators per texture height
+    {
+        const int W = 128, H = 16;
+        std::vector<uint8_t> c(W * H * 4);
+        const V3 shirts[] = {V3(0.9f, 0.15f, 0.15f), V3(0.15f, 0.4f, 0.9f), V3(1, 0.85f, 0.1f), V3(0.95f, 0.95f, 0.95f), V3(0.2f, 0.75f, 0.3f),
+                             V3(1, 0.5f, 0.1f), V3(0.6f, 0.2f, 0.7f), V3(0.1f, 0.1f, 0.12f), V3(0.2f, 0.8f, 0.9f), V3(1, 0.4f, 0.7f)};
+        const V3 skins[] = {V3(0.95f, 0.78f, 0.62f), V3(0.78f, 0.56f, 0.40f), V3(0.55f, 0.37f, 0.25f), V3(0.98f, 0.85f, 0.72f)};
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int person = x / 6, px6 = x % 6;
+                V3 col(0.32f, 0.34f, 0.38f);   // seats
+                bool empty = hash2(person, 7) < 0.08f;
+                if (!empty) {
+                    V3 sh = shirts[(int)(hash2(person, 1) * 10) % 10];
+                    V3 sk = skins[(int)(hash2(person, 2) * 4) % 4];
+                    int headTop = 2 + (int)(hash2(person, 3) * 2);
+                    if (y >= headTop && y < headTop + 4 && px6 >= 1 && px6 <= 4) col = sk;
+                    if (y >= headTop && y < headTop + 1 && px6 >= 1 && px6 <= 4 && hash2(person, 4) < 0.4f) col = sh * 0.7f; // cap
+                    if (y >= headTop + 4 && y < 14 && px6 <= 5) col = sh;
+                    if (y >= headTop + 4 && y < headTop + 6 && (px6 == 0 || px6 == 5) && hash2(person, 5) < 0.3f) col = sk;   // arms up
+                }
+                uint8_t* p = &c[(y * W + x) * 4];
+                p[0] = (uint8_t)(col.x * 255); p[1] = (uint8_t)(col.y * 255); p[2] = (uint8_t)(col.z * 255); p[3] = 255;
+            }
+        texCrowd = uploadTex(c, W, H);
+    }
+}
+
+// ------------------------------------------------------------- liveries
+void Renderer::paintLivery(const Livery& L, GLuint& texOut) {
+    const int TW = 704, TH = 1032; const float D = 128;
+    Target t; t.create(TW, TH, false);
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glViewport(0, 0, TW, TH);
+    glClearColor(L.c1.x, L.c1.y, L.c1.z, 1); glClear(GL_COLOR_BUFFER_BIT);
+    hud.clear();
+    V4 c1 = {L.c1.x, L.c1.y, L.c1.z, 1}, c2 = {L.c2.x, L.c2.y, L.c2.z, 1}, c3 = {L.c3.x, L.c3.y, L.c3.z, 1};
+    V4 num = {L.num.x, L.num.y, L.num.z, 1}, blk = {0.05f, 0.05f, 0.06f, 1}, wht = {1, 1, 1, 1};
+    char nb[8]; snprintf(nb, sizeof nb, "%d", L.number);
+
+    auto SL = [&](float z, float y) { return V2{(2.6f - z) * D, (1.5f - y) * D}; };
+    auto SR = [&](float z, float y) { return V2{(z + 2.6f) * D, 180 + (1.5f - y) * D}; };
+    auto TOP = [&](float x, float z) { return V2{(1.1f - x) * D, 360 + (2.6f - z) * D}; };
+    auto RE = [&](float x, float y) { return V2{300 + (1.1f - x) * D, 360 + (1.5f - y) * D}; };
+    auto FR = [&](float x, float y) { return V2{300 + (x + 1.1f) * D, 560 + (1.5f - y) * D}; };
+    auto fitText = [&](const char* s, V2 c, float size, float maxW, V4 col, int mode) {
+        float w = font.measure(s) * size;
+        if (w > maxW) size *= maxW / w;
+        text(s, c.x, c.y + size * 0.36f, size, col, col, 1, mode);
+    };
+
+    for (int side = 0; side < 2; side++) {
+        auto S = [&](float z, float y) { return side == 0 ? SL(z, y) : SR(z, y); };
+        auto band = [&](float (*lo)(float, int), float (*hi)(float, int), V4 col, int pat) {
+            const int NSEG = 40;
+            for (int i = 0; i < NSEG; i++) {
+                float z0 = -2.6f + 5.2f * i / NSEG, z1 = -2.6f + 5.2f * (i + 1) / NSEG;
+                float a0 = lo(z0, pat), a1 = lo(z1, pat), b0 = hi(z0, pat), b1 = hi(z1, pat);
+                if (b0 <= a0 && b1 <= a1) continue;
+                quad2(S(z0, a0), S(z1, a1), S(z1, fmaxf(a1, b1)), S(z0, fmaxf(a0, b0)), col);
+            }
+        };
+        int pat = L.pattern;
+        if (pat == 0) {        // sweeping swoosh, rear-low to front-high
+            band([](float z, int) { float t = (z + 2.6f) / 5.2f; return 0.30f + 0.30f * t * t; },
+                 [](float z, int) { float t = (z + 2.6f) / 5.2f; return 0.52f + 0.42f * t - 0.18f * t * t; }, c2, pat);
+            band([](float z, int) { float t = (z + 2.6f) / 5.2f; return 0.52f + 0.42f * t - 0.18f * t * t; },
+                 [](float z, int) { float t = (z + 2.6f) / 5.2f; return 0.57f + 0.42f * t - 0.18f * t * t; }, c3, pat);
+        } else if (pat == 1) { // two-tone split with pin stripe
+            band([](float z, int) { return 0.0f; }, [](float z, int) { return 0.52f + 0.10f * sinf(z * 1.2f); }, c2, pat);
+            band([](float z, int) { return 0.52f + 0.10f * sinf(z * 1.2f); }, [](float z, int) { return 0.56f + 0.10f * sinf(z * 1.2f); }, c3, pat);
+        } else if (pat == 2) { // racing stripes along the flank + slashes on the nose
+            band([](float z, int) { return 0.66f; }, [](float z, int) { return 0.76f; }, c2, pat);
+            band([](float z, int) { return 0.79f; }, [](float z, int) { return 0.83f; }, c3, pat);
+            for (int k = 0; k < 3; k++) {
+                float z0 = 1.2f + k * 0.32f;
+                quad2(S(z0, 0.25f), S(z0 + 0.16f, 0.25f), S(z0 + 0.42f, 0.95f), S(z0 + 0.26f, 0.95f), k == 1 ? c3 : c2);
+            }
+        } else {               // lightning zig-zag
+            const float zz[] = {-2.6f, -1.6f, -1.2f, 0.2f, 0.6f, 2.6f};
+            const float yy[] = {0.40f, 0.62f, 0.46f, 0.80f, 0.60f, 0.92f};
+            for (int k = 0; k < 5; k++) {
+                quad2(S(zz[k], yy[k]), S(zz[k + 1], yy[k + 1]), S(zz[k + 1], yy[k + 1] + 0.14f), S(zz[k], yy[k] + 0.14f), c2);
+                quad2(S(zz[k], yy[k] + 0.14f), S(zz[k + 1], yy[k + 1] + 0.14f), S(zz[k + 1], yy[k + 1] + 0.18f), S(zz[k], yy[k] + 0.18f), c3);
+            }
+        }
+        // black rocker panel
+        quad2(S(-2.6f, 0.0f), S(2.6f, 0.0f), S(2.6f, 0.30f), S(-2.6f, 0.30f), blk);
+        // door number on a panel
+        V2 nc = S(-0.12f, 0.64f);
+        if (pat == 1 || pat == 3) {
+            rrect(nc.x - 0.42f * D, nc.y - 0.33f * D, 0.84f * D, 0.66f * D, 12, wht);
+            text(nb, nc.x, nc.y + 0.60f * D * 0.36f, 0.60f * D, c1, c1, 1, 1);
+        } else {
+            text(nb, nc.x, nc.y + 0.66f * D * 0.36f, 0.66f * D, num, num, 1, 3);
+        }
+        // rear quarter sponsor + front fender team
+        fitText(L.sponsor.c_str(), S(-1.62f, 0.62f), 0.24f * D, 1.15f * D, wht, 1);
+        fitText(L.team.c_str(), S(1.58f, 0.70f), 0.13f * D, 0.9f * D, wht, 1);
+        // contingency decals
+        const V4 dc[3] = {{1, 1, 1, 1}, {0.9f, 0.1f, 0.1f, 1}, {1, 0.85f, 0.1f, 1}};
+        const char* dt[3] = {"TIRES", "OIL", "GEAR"};
+        for (int k = 0; k < 3; k++) {
+            V2 a = S(0.70f + k * 0.18f, 0.36f), b = S(0.86f + k * 0.18f, 0.48f);
+            float x0 = fminf(a.x, b.x), y0 = fminf(a.y, b.y);
+            rect(x0, y0, fabsf(b.x - a.x), fabsf(b.y - a.y), dc[k]);
+            text(dt[k], (a.x + b.x) * 0.5f, y0 + fabsf(b.y - a.y) * 0.72f, 7, k == 0 ? blk : wht, k == 0 ? blk : wht, 1, 5);
+        }
+        // headlight / taillight hints on the flanks
+        quad2(S(2.30f, 0.60f), S(2.55f, 0.60f), S(2.55f, 0.66f), S(2.25f, 0.68f), {1, 0.95f, 0.75f, 1});
+        quad2(S(-2.55f, 0.78f), S(-2.35f, 0.78f), S(-2.35f, 0.86f), S(-2.55f, 0.86f), {0.9f, 0.08f, 0.06f, 1});
+    }
+    // ---- top
+    {
+        if (L.pattern == 0 || L.pattern == 2) {
+            for (int sd = -1; sd <= 1; sd += 2) {
+                V2 a = TOP(sd * 0.22f, 2.6f), b = TOP(sd * 0.38f, -2.6f);
+                rect(fminf(a.x, b.x), fminf(a.y, b.y), fabsf(b.x - a.x), fabsf(b.y - a.y), c2);
+            }
+        } else {
+            V2 a = TOP(1.1f, 2.6f), b = TOP(-1.1f, 1.0f);
+            rect(fminf(a.x, b.x), fminf(a.y, b.y), fabsf(b.x - a.x), fabsf(b.y - a.y), c2);
+        }
+        V2 rn = TOP(0, -0.38f);
+        rrect(rn.x - 0.5f * D, rn.y - 0.45f * D, 1.0f * D, 0.9f * D, 14, L.pattern == 1 ? c2 : wht);
+        text(nb, rn.x, rn.y + 0.78f * D * 0.36f, 0.78f * D, L.pattern == 1 ? wht : c1, L.pattern == 1 ? wht : c1, 1, 1);
+        fitText(L.sponsor.c_str(), TOP(0, 1.75f), 0.30f * D, 1.6f * D, L.pattern == 1 ? c1 : wht, 1);
+        fitText(L.team.c_str(), TOP(0, -2.22f), 0.15f * D, 1.5f * D, wht, 1);
+    }
+    // ---- rear
+    {
+        V2 a = RE(1.1f, 0.44f), b = RE(-1.1f, 0.10f);
+        rect(fminf(a.x, b.x), fminf(a.y, b.y), fabsf(b.x - a.x), fabsf(b.y - a.y), c2);
+        for (int sd = -1; sd <= 1; sd += 2) {
+            V2 p0 = RE(sd * 0.20f, 0.76f), p1 = RE(sd * 0.80f, 0.90f);
+            rect(fminf(p0.x, p1.x) - 2, fminf(p0.y, p1.y) - 2, fabsf(p1.x - p0.x) + 4, fabsf(p1.y - p0.y) + 4, blk);
+            rect(fminf(p0.x, p1.x), fminf(p0.y, p1.y), fabsf(p1.x - p0.x), fabsf(p1.y - p0.y), {0.85f, 0.06f, 0.05f, 1});
+            rect(fminf(p0.x, p1.x) + 4, fminf(p0.y, p1.y) + 4, fabsf(p1.x - p0.x) - 8, 5, {1, 0.45f, 0.35f, 1});
+        }
+        fitText(L.sponsor.c_str(), RE(0, 0.60f), 0.32f * D, 1.75f * D, wht, 3);
+        fitText(L.team.c_str(), RE(0, 0.32f), 0.10f * D, 1.4f * D, L.pattern == 2 ? wht : blk, 5);
+    }
+    // ---- front
+    {
+        V2 a = FR(-0.75f, 0.42f), b = FR(0.75f, 0.20f);
+        rect(fminf(a.x, b.x), fminf(a.y, b.y), fabsf(b.x - a.x), fabsf(b.y - a.y), blk);
+        for (int sd = -1; sd <= 1; sd += 2) {
+            V2 p0 = FR(sd * 0.32f, 0.52f), p1 = FR(sd * 0.84f, 0.52f), p2 = FR(sd * 0.84f, 0.66f), p3 = FR(sd * 0.40f, 0.62f);
+            quad2({p0.x, p0.y + 3}, {p1.x, p1.y + 3}, {p2.x, p2.y - 3}, {p3.x, p3.y - 3}, blk);
+            quad2(p0, p1, p2, p3, {1.0f, 0.95f, 0.72f, 1});
+        }
+        fitText(L.sponsor.c_str(), FR(0, 0.74f), 0.16f * D, 1.4f * D, wht, 1);
+    }
+    flushHud((float)TW, (float)TH, V3(0.03f, 0.03f, 0.04f));
+    texOut = t.tex;
+    glBindTexture(GL_TEXTURE_2D, texOut);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glDeleteFramebuffers(1, &t.fbo);
 }
 
 // ------------------------------------------------------------- init
@@ -94,53 +315,55 @@ void Renderer::init(Game& g) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    buildWorld(g.track, font, geo);
-    buildCars(font, g.cars, geo);
-    ftLog("world verts %d, road %d, text %d, car %d", (int)geo.world.v.size(), (int)geo.road.size(), (int)geo.text.size(), (int)geo.car.v.size());
-
-    auto vtxLayout = {std::make_pair(3, 0), std::make_pair(3, 3), std::make_pair(4, 6), std::make_pair(1, 10)};
-    vaoWorld = makeVao(vboWorld, geo.world.v.data(), geo.world.v.size() * sizeof(Vtx), GL_STATIC_DRAW, vtxLayout, 11);
-    nWorld = (int)geo.world.v.size();
-    vaoCar = makeVao(vboCar, geo.car.v.data(), geo.car.v.size() * sizeof(Vtx), GL_STATIC_DRAW, vtxLayout, 11);
-    nCar = (int)geo.car.v.size();
-    vaoRoad = makeVao(vboRoad, geo.road.data(), geo.road.size() * sizeof(RoadVtx), GL_STATIC_DRAW, {{3, 0}, {3, 3}}, 6);
-    nRoad = (int)geo.road.size();
-    auto textLayout = {std::make_pair(3, 0), std::make_pair(2, 3), std::make_pair(4, 5)};
-    vaoText = makeVao(vboText, geo.text.data(), geo.text.size() * sizeof(TextVtx), GL_STATIC_DRAW, textLayout, 9);
-    nText = (int)geo.text.size();
-    vaoCarText = makeVao(vboCarText, geo.carText.data(), geo.carText.size() * sizeof(TextVtx), GL_STATIC_DRAW, textLayout, 9);
-    // rain: line segments, each with two vertices sharing a seed
-    {
-        Rng r(99);
-        std::vector<float> rv;
-        const int drops = 2600;
-        for (int i = 0; i < drops; i++) {
-            float sx = r.f(), sy = r.f(), sz = r.f();
-            rv.insert(rv.end(), {sx, sy, sz, 0.0f, sx, sy, sz, 1.0f});
-        }
-        nRain = drops * 2;
-        vaoRain = makeVao(vboRain, rv.data(), rv.size() * 4, GL_STATIC_DRAW, {{4, 0}}, 4);
-    }
-    vaoSpray = makeVao(vboSpray, nullptr, 0, GL_STREAM_DRAW, {{3, 0}, {3, 3}}, 6);
-    vaoHud = makeVao(vboHud, nullptr, 0, GL_STREAM_DRAW, {{2, 0}, {2, 2}, {4, 4}, {1, 8}}, 9);
-    {
-        float q[] = {-1.25f, 0, -2.8f, 1.25f, 0, -2.8f, 1.25f, 0, 2.8f, -1.25f, 0, -2.8f, 1.25f, 0, 2.8f, -1.25f, 0, 2.8f};
-        vaoShadow = makeVao(vboShadow, q, sizeof q, GL_STATIC_DRAW, {{3, 0}}, 3);
-    }
-    glGenVertexArrays(1, &vaoFull);
-
     pWorld.build(kWorldVS, kWorldFS, {"a_pos", "a_nrm", "a_col", "a_aux"});
     pRoad.build(kRoadVS, kRoadFS, {"a_pos", "a_road"});
     pText.build(kTextVS, kTextFS, {"a_pos", "a_uv", "a_col"});
     pSky.build(kFullVS, kSkyFS, {});
     pRain.build(kRainVS, kRainFS, {"a_seed"});
-    pSpray.build(kSprayVS, kSprayFS, {"a_pos", "a_uva"});
+    pPart.build(kPartVS, kPartFS, {"a_pos", "a_uv", "a_col", "a_type"});
+    pSkid.build(kSkidVS, kSkidFS, {"a_pos", "a_au"});
     pBlurRefl.build(kFullVS, kReflBlurFS, {});
     pBright.build(kFullVS, kBrightFS, {});
     pBlur.build(kFullVS, kBlurFS, {});
     pComposite.build(kFullVS, kCompositeFS, {});
     pHud.build(kHudVS, kHudFS, {"a_pos", "a_uv", "a_col", "a_mode"});
     pShadow.build(kShadowVS, kShadowFS, {"a_pos"});
+    vaoHud = makeVao(vboHud, nullptr, 0, GL_STREAM_DRAW, {{2, 0}, {2, 2}, {4, 4}, {1, 8}}, 9);
+    glGenVertexArrays(1, &vaoFull);
+
+    makeTextures();
+    buildWorld(g.track, font, geo);
+    buildCarMesh(geo.car);
+    buildWheelMesh(geo.wheel);
+    ftLog("world verts %d, road %d, text %d, car %d, wheel %d", (int)geo.world.v.size(), (int)geo.road.size(), (int)geo.text.size(), (int)geo.car.v.size(), (int)geo.wheel.v.size());
+
+    auto vtxLayout = {std::make_pair(3, 0), std::make_pair(3, 3), std::make_pair(4, 6), std::make_pair(1, 10)};
+    vaoWorld = makeVao(vboWorld, geo.world.v.data(), geo.world.v.size() * sizeof(Vtx), GL_STATIC_DRAW, vtxLayout, 11);
+    nWorld = (int)geo.world.v.size();
+    vaoCar = makeVao(vboCar, geo.car.v.data(), geo.car.v.size() * sizeof(Vtx), GL_STATIC_DRAW, vtxLayout, 11);
+    nCar = (int)geo.car.v.size();
+    vaoWheel = makeVao(vboWheel, geo.wheel.v.data(), geo.wheel.v.size() * sizeof(Vtx), GL_STATIC_DRAW, vtxLayout, 11);
+    nWheel = (int)geo.wheel.v.size();
+    vaoRoad = makeVao(vboRoad, geo.road.data(), geo.road.size() * sizeof(RoadVtx), GL_STATIC_DRAW, {{3, 0}, {4, 3}}, 7);
+    nRoad = (int)geo.road.size();
+    vaoText = makeVao(vboText, geo.text.data(), geo.text.size() * sizeof(TextVtx), GL_STATIC_DRAW, {{3, 0}, {2, 3}, {4, 5}}, 9);
+    nText = (int)geo.text.size();
+    {
+        Rng r(99);
+        std::vector<float> rv;
+        const int drops = 2600;
+        for (int i = 0; i < drops; i++) { float sx = r.f(), sy = r.f(), sz = r.f(); rv.insert(rv.end(), {sx, sy, sz, 0.0f, sx, sy, sz, 1.0f}); }
+        nRain = drops * 2;
+        vaoRain = makeVao(vboRain, rv.data(), rv.size() * 4, GL_STATIC_DRAW, {{4, 0}}, 4);
+    }
+    vaoPart = makeVao(vboPart, nullptr, 0, GL_STREAM_DRAW, {{3, 0}, {2, 3}, {4, 5}, {1, 9}}, 10);
+    vaoSkid = makeVao(vboSkid, g.skid.data(), g.skid.size() * sizeof(SkidVtx), GL_DYNAMIC_DRAW, {{3, 0}, {2, 3}}, 5);
+    {
+        float q[] = {-1.35f, 0, -2.9f, 1.35f, 0, -2.9f, 1.35f, 0, 2.9f, -1.35f, 0, -2.9f, 1.35f, 0, 2.9f, -1.35f, 0, 2.9f};
+        vaoShadow = makeVao(vboShadow, q, sizeof q, GL_STATIC_DRAW, {{3, 0}}, 3);
+    }
+    livery.resize(g.cars.size());
+    for (size_t i = 0; i < g.cars.size(); i++) paintLivery(g.cars[i].liv, livery[i]);
 
     GLint maxS = 0; glGetIntegerv(GL_MAX_SAMPLES, &maxS);
     samples = std::min(4, (int)maxS);
@@ -169,32 +392,26 @@ void Renderer::resize(int W, int H) {
 }
 
 // ------------------------------------------------------------- scene
-static const V3 kSun = norm(V3(0.35f, 0.42f, 0.84f));
-static const float kFog = 0.0017f;
-
-static void setCommon(Prog& p, V3 cam, float flash, const M4& vp) {
-    p.use();
-    glUniformMatrix4fv(p.U("u_vp"), 1, GL_FALSE, vp.m);
-    glUniform3f(p.U("u_cam"), cam.x, cam.y, cam.z);
-    glUniform3f(p.U("u_sunDir"), kSun.x, kSun.y, kSun.z);
-    glUniform1f(p.U("u_flash"), flash);
-    glUniform1f(p.U("u_fogD"), kFog);
-}
-
-static float carFade(const Game& g, int i) {
-    if (i == g.player || g.state == State::Title) return 1.0f;
-    V3 d = g.cars[i].pos - g.camPos; d.y = 0;
-    return smooth(2.8f, 6.5f, len(d));
-}
-static M4 carModel(const Car& c) {
-    float roll = clampf(c.yawRate * c.speed() * 0.0035f, -0.06f, 0.06f);
-    float pitch = clampf(-c.throttle * 0.012f + c.brake * 0.02f, -0.03f, 0.03f);
-    return translate(c.pos + V3(0, 0.02f + c.bump * 0.05f, 0)) * rotY(c.yaw) * rotZ(-roll) * rotX(pitch);
-}
+static V3 sunDir(const Game& g) { return g.weather == Weather::Rain ? norm(V3(0.35f, 0.42f, 0.84f)) : norm(V3(-0.45f, 0.62f, 0.64f)); }
 
 void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
     M4 I = M4::ident();
     float flash = g.flash > 0 ? g.flash * (0.6f + 0.4f * sinf(g.globalTime * 60)) : 0;
+    float rain = g.weather == Weather::Rain ? 1.0f : 0.0f;
+    V3 sun = sunDir(g);
+    float tS0 = 0, tS1 = 0;
+    for (auto& z : g.track.zones) if (z.type == Z_TUNNEL) { tS0 = z.s0; tS1 = z.s1; }
+    V3 tA = g.track.at(tS0, 0), tB = g.track.at(tS1, 0);
+    auto common = [&](Prog& p) {
+        p.use();
+        glUniformMatrix4fv(p.U("u_vp"), 1, GL_FALSE, vp.m);
+        glUniform3f(p.U("u_cam"), cam.x, cam.y, cam.z);
+        glUniform3f(p.U("u_sunDir"), sun.x, sun.y, sun.z);
+        glUniform1f(p.U("u_flash"), flash);
+        glUniform1f(p.U("u_rain"), rain);
+        glUniform3f(p.U("u_tunA"), tA.x, tA.y, tA.z);
+        glUniform3f(p.U("u_tunB"), tB.x, tB.y, tB.z);
+    };
 
     // sky
     {
@@ -202,165 +419,242 @@ void Renderer::drawScene(Game& g, const M4& vp, V3 cam, bool reflection) {
         if (reflection) { f.y = -f.y; r.y = -r.y; u.y = -u.y; }
         float ty = tanf(g.camFov * PI / 360.0f), tx = ty * (float)w / (float)h;
         glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
-        pSky.use();
+        common(pSky);
         glUniform3f(pSky.U("u_fwd"), f.x, f.y, f.z);
         glUniform3f(pSky.U("u_right"), r.x, r.y, r.z);
         glUniform3f(pSky.U("u_up"), u.x, u.y, u.z);
         glUniform2f(pSky.U("u_tan"), tx, ty);
         glUniform1f(pSky.U("u_time"), g.globalTime);
-        glUniform3f(pSky.U("u_sunDir"), kSun.x, kSun.y, kSun.z);
-        glUniform1f(pSky.U("u_flash"), flash);
         glBindVertexArray(vaoFull);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE);
     }
 
     // static world
-    setCommon(pWorld, cam, flash, vp);
+    common(pWorld);
     glUniform1f(pWorld.U("u_clip"), reflection ? 1.0f : 0.0f);
     glUniform1f(pWorld.U("u_fade"), 1.0f);
+    glUniform1f(pWorld.U("u_time"), g.globalTime);
     glUniformMatrix4fv(pWorld.U("u_model"), 1, GL_FALSE, I.m);
+    glActiveTexture(GL_TEXTURE0 + 1); glBindTexture(GL_TEXTURE_2D, texAsphalt);
+    glActiveTexture(GL_TEXTURE0 + 2); glBindTexture(GL_TEXTURE_2D, texGrass);
+    glActiveTexture(GL_TEXTURE0 + 3); glBindTexture(GL_TEXTURE_2D, texRock);
+    glActiveTexture(GL_TEXTURE0 + 4); glBindTexture(GL_TEXTURE_2D, texCrowd);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(pWorld.U("u_livery"), 0);
+    glUniform1i(pWorld.U("u_texA"), 1);
+    glUniform1i(pWorld.U("u_texG"), 2);
+    glUniform1i(pWorld.U("u_texR"), 3);
+    glUniform1i(pWorld.U("u_texC"), 4);
     glBindVertexArray(vaoWorld);
     glDrawArrays(GL_TRIANGLES, 0, nWorld);
 
-    // road
     if (!reflection) {
-        setCommon(pRoad, cam, flash, vp);
+        // road
+        common(pRoad);
         glUniform1f(pRoad.U("u_time"), g.globalTime);
         glUniform1f(pRoad.U("u_halfW"), g.track.halfW);
-        glUniform1f(pRoad.U("u_trackLen"), g.track.length);
         glUniform2f(pRoad.U("u_res"), (float)w, (float)h);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, reflBlur.tex);
-        glActiveTexture(GL_TEXTURE0 + 1); glBindTexture(GL_TEXTURE_2D, refl.tex);
+        glActiveTexture(GL_TEXTURE0 + 5); glBindTexture(GL_TEXTURE_2D, refl.tex);
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(pRoad.U("u_refl"), 0);
-        glUniform1i(pRoad.U("u_reflSharp"), 1);
+        glUniform1i(pRoad.U("u_reflSharp"), 5);
+        glUniform1i(pRoad.U("u_texA"), 1);
         glBindVertexArray(vaoRoad);
         glDrawArrays(GL_TRIANGLES, 0, nRoad);
 
-        // car contact shadows
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE);
-        pShadow.use();
-        glUniformMatrix4fv(pShadow.U("u_vp"), 1, GL_FALSE, vp.m);
+        // skid marks (ring buffer upload of new segments)
+        {
+            int segs = (int)(g.skid.size() / 6);
+            long long fresh = g.skidWritten - skidUploaded;
+            glBindBuffer(GL_ARRAY_BUFFER, vboSkid);
+            if (fresh >= segs) glBufferSubData(GL_ARRAY_BUFFER, 0, g.skid.size() * sizeof(SkidVtx), g.skid.data());
+            else if (fresh > 0) {
+                int start = (int)(((g.skidHead - fresh) % segs + segs) % segs);
+                int n1 = (int)std::min<long long>(fresh, segs - start);
+                glBufferSubData(GL_ARRAY_BUFFER, start * 6 * sizeof(SkidVtx), n1 * 6 * sizeof(SkidVtx), &g.skid[start * 6]);
+                if (fresh > n1) glBufferSubData(GL_ARRAY_BUFFER, 0, (fresh - n1) * 6 * sizeof(SkidVtx), &g.skid[0]);
+            }
+            skidUploaded = g.skidWritten;
+            if (g.skidCount > 0) {
+                common(pSkid);
+                glBindVertexArray(vaoSkid);
+                glDrawArrays(GL_TRIANGLES, 0, g.skidCount * 6);
+            }
+        }
+        // contact shadows
+        common(pShadow);
         glBindVertexArray(vaoShadow);
         for (auto& c : g.cars) {
-            M4 m = translate(c.pos) * rotY(c.yaw);
+            M4 m = translate(c.pos + V3(-sun.x, 0, -sun.z) * 0.25f) * rotY(c.yaw);
             glUniformMatrix4fv(pShadow.U("u_model"), 1, GL_FALSE, m.m);
+            glUniform1f(pShadow.U("u_alpha"), g.track.inTunnel(c.s) ? 0.35f : 0.62f);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
         glDepthMask(GL_TRUE); glDisable(GL_BLEND);
     }
 
     // cars
-    setCommon(pWorld, cam, flash, vp);
+    common(pWorld);
     glUniform1f(pWorld.U("u_clip"), reflection ? 1.0f : 0.0f);
-    glBindVertexArray(vaoCar);
     for (size_t ci = 0; ci < g.cars.size(); ci++) {
         const Car& c = g.cars[ci];
-        if (len(c.pos - g.camPos) > 900) continue;
-        float fade = reflection ? 1.0f : carFade(g, (int)ci);
+        float dcam = len(c.pos - g.camPos);
+        if (dcam > 900) continue;
+        float fade = 1.0f;
+        if (!reflection && (int)ci != g.player && g.state != State::Title) { V3 d = c.pos - g.camPos; d.y = 0; fade = smooth(2.8f, 6.0f, len(d)); }
         if (fade <= 0.02f) continue;
         glUniform1f(pWorld.U("u_fade"), fade);
-        M4 m = carModel(c);
+        M4 m = translate(c.pos + V3(0, 0.02f + c.heave * 0.5f, 0)) * rotY(c.yaw) * rotZ(-c.rollVis) * rotX(c.pitchVis);
         glUniformMatrix4fv(pWorld.U("u_model"), 1, GL_FALSE, m.m);
-        glUniform3f(pWorld.U("u_p1"), c.liv.c1.x, c.liv.c1.y, c.liv.c1.z);
-        glUniform3f(pWorld.U("u_p2"), c.liv.c2.x, c.liv.c2.y, c.liv.c2.z);
-        glUniform3f(pWorld.U("u_p3"), c.liv.c3.x, c.liv.c3.y, c.liv.c3.z);
+        glBindTexture(GL_TEXTURE_2D, livery[ci]);
+        glBindVertexArray(vaoCar);
         glDrawArrays(GL_TRIANGLES, 0, nCar);
+        if (dcam < 300) {
+            glUniform3f(pWorld.U("u_rim"), c.liv.wheel.x, c.liv.wheel.y, c.liv.wheel.z);
+            M4 base = translate(c.pos + V3(0, 0.0f, 0)) * rotY(c.yaw);
+            glBindVertexArray(vaoWheel);
+            for (int wi = 0; wi < 4; wi++) {
+                V3 wp; float sg; bool front;
+                wheelLayout(wi, &wp, &sg, &front);
+                M4 wm = base * translate(wp) * rotY(front ? c.steerAngle : 0.0f) * scaleM(V3(sg, 1, 1)) * rotX(c.wheelSpin);
+                glUniformMatrix4fv(pWorld.U("u_model"), 1, GL_FALSE, wm.m);
+                glDrawArrays(GL_TRIANGLES, 0, nWheel);
+            }
+        }
     }
     glUniform1f(pWorld.U("u_fade"), 1.0f);
 
-    // text: signs and decals
+    // sign text
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    setCommon(pText, cam, flash, vp);
+    common(pText);
     glUniform1f(pText.U("u_clip"), reflection ? 1.0f : 0.0f);
     glUniform1i(pText.U("u_font"), 0);
     glBindTexture(GL_TEXTURE_2D, fontTex);
-    glUniform1f(pText.U("u_outline"), 0.0f);
-    glUniform1f(pText.U("u_fade"), 1.0f);
     glUniformMatrix4fv(pText.U("u_model"), 1, GL_FALSE, I.m);
     glBindVertexArray(vaoText);
     glDrawArrays(GL_TRIANGLES, 0, nText);
-    glUniform1f(pText.U("u_outline"), 0.09f);
-    glBindVertexArray(vaoCarText);
-    for (size_t i = 0; i < g.cars.size(); i++) {
-        const Car& c = g.cars[i];
-        if (len(c.pos - g.camPos) > 250) continue;
-        float fade = reflection ? 1.0f : carFade(g, (int)i);
-        if (fade <= 0.02f) continue;
-        glUniform1f(pText.U("u_fade"), fade);
-        M4 m = carModel(c);
-        glUniformMatrix4fv(pText.U("u_model"), 1, GL_FALSE, m.m);
-        glDrawArrays(GL_TRIANGLES, geo.carTextStart[i], geo.carTextCount[i]);
-    }
 
     if (!reflection) {
-        // spray
-        glDepthMask(GL_FALSE);
-        if (!g.spray.empty()) {
-            V3 f = norm(g.camLook - g.camPos), r = norm(cross(f, V3(0, 1, 0))), u = cross(r, f);
-            sprayBuf.clear();
-            for (const Particle& p : g.spray) {
-                float a = p.alpha * sat(p.life / p.maxLife * 1.5f) * sat((p.maxLife - p.life) * 8.0f);
-                V3 R = r * p.size, U = u * p.size;
-                V3 c[4] = {p.p - R - U, p.p + R - U, p.p + R + U, p.p - R + U};
-                float uv[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
-                int idx[6] = {0, 1, 2, 0, 2, 3};
-                for (int k : idx) sprayBuf.insert(sprayBuf.end(), {c[k].x, c[k].y, c[k].z, uv[k][0], uv[k][1], a});
-            }
-            setCommon(pSpray, cam, flash, vp);
-            glUniform3f(pSpray.U("u_tint"), 0.66f, 0.69f, 0.72f);
-            glBindVertexArray(vaoSpray);
-            glBindBuffer(GL_ARRAY_BUFFER, vboSpray);
-            glBufferData(GL_ARRAY_BUFFER, sprayBuf.size() * 4, sprayBuf.data(), GL_STREAM_DRAW);
-            glDrawArrays(GL_TRIANGLES, 0, (int)sprayBuf.size() / 6);
+        drawParticles(g, vp, cam);
+        if (g.weather == Weather::Rain) {
+            glDepthMask(GL_FALSE);
+            common(pRain);
+            glUniform1f(pRain.U("u_time"), g.globalTime);
+            glUniform3f(pRain.U("u_box"), 50, 28, 50);
+            V3 rel = V3(1.5f, -24.0f, 0.8f) - g.cars[g.player].vel;
+            glUniform3f(pRain.U("u_rel"), rel.x, rel.y, rel.z);
+            glBindVertexArray(vaoRain);
+            glDrawArrays(GL_LINES, 0, nRain);
+            glDepthMask(GL_TRUE);
         }
-        // rain
-        setCommon(pRain, cam, flash, vp);
-        glUniform1f(pRain.U("u_time"), g.globalTime);
-        glUniform3f(pRain.U("u_box"), 50, 28, 50);
-        const Car& pc = g.cars[g.player];
-        V3 rel = V3(1.5f, -24.0f, 0.8f) - pc.vel;
-        glUniform3f(pRain.U("u_rel"), rel.x, rel.y, rel.z);
-        glBindVertexArray(vaoRain);
-        glDrawArrays(GL_LINES, 0, nRain);
-        glDepthMask(GL_TRUE);
     }
     glDisable(GL_BLEND);
+    (void)common;
 }
 
-static void fullscreen(Prog& p, GLuint vao) { (void)p; glBindVertexArray(vao); glDrawArrays(GL_TRIANGLES, 0, 3); }
+void Renderer::drawParticles(Game& g, const M4& vp, V3 cam) {
+    if (g.parts.empty()) return;
+    V3 f = norm(g.camLook - g.camPos), r = norm(cross(f, V3(0, 1, 0))), u = cross(r, f);
+    partBuf.clear(); partAdd.clear();
+    auto put = [&](std::vector<float>& b, V3 p, float uu, float vv, V3 c, float a, float type) {
+        b.insert(b.end(), {p.x, p.y, p.z, uu, vv, c.x, c.y, c.z, a, type});
+    };
+    for (const Particle& p : g.parts) {
+        float lifeK = p.life / p.maxLife;
+        if (p.type == P_SPARK) {
+            V3 dir = p.v; float sp = len(dir);
+            if (sp < 0.1f) continue;
+            dir = dir * (1.0f / sp);
+            float L = clampf(sp * 0.03f, 0.08f, 0.7f);
+            V3 view = norm(p.p - cam);
+            V3 side = norm(cross(dir, view)) * 0.035f;
+            V3 a = p.p, b = p.p - dir * L;
+            float al = sat(lifeK * 2.0f);
+            put(partAdd, a - side, 0, -1, p.col, al, 1); put(partAdd, b - side, 1, -1, p.col, al, 1); put(partAdd, b + side, 1, 1, p.col, al, 1);
+            put(partAdd, a - side, 0, -1, p.col, al, 1); put(partAdd, b + side, 1, 1, p.col, al, 1); put(partAdd, a + side, 0, 1, p.col, al, 1);
+            continue;
+        }
+        if (p.type == P_CONFETTI) {
+            float c = cosf(p.rot), s = sinf(p.rot);
+            V3 ax = V3(c, 0.4f * s, s) * p.size, az = V3(-s * 0.6f, 0.3f * c, c * 0.6f) * p.size;
+            if (p.p.y <= 0.03f) { ax = V3(c, 0, s) * p.size; az = V3(-s, 0, c) * (p.size * 0.6f); }
+            V3 q[4] = {p.p - ax - az, p.p + ax - az, p.p + ax + az, p.p - ax + az};
+            int idx[6] = {0, 1, 2, 0, 2, 3};
+            for (int k : idx) put(partBuf, q[k], 0, 0, p.col, 1, 4);
+            continue;
+        }
+        float a;
+        if (p.type == P_FLAME) a = sat(lifeK * 1.5f);
+        else a = p.alpha * sat(lifeK * 1.5f) * sat((1 - lifeK) * 8.0f);
+        float c = cosf(p.rot), s = sinf(p.rot);
+        V3 R = (r * c + u * s) * p.size, U = (u * c - r * s) * p.size;
+        V3 q[4] = {p.p - R - U, p.p + R - U, p.p + R + U, p.p - R + U};
+        float uv[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        int idx[6] = {0, 1, 2, 0, 2, 3};
+        std::vector<float>& b = p.type == P_FLAME ? partAdd : partBuf;
+        for (int k : idx) put(b, q[k], uv[k][0], uv[k][1], p.col, a, p.type == P_FLAME ? 2.0f : 0.0f);
+    }
+    float rain = g.weather == Weather::Rain ? 1.0f : 0.0f;
+    V3 sun = sunDir(g);
+    pPart.use();
+    glUniformMatrix4fv(pPart.U("u_vp"), 1, GL_FALSE, vp.m);
+    glUniform3f(pPart.U("u_cam"), cam.x, cam.y, cam.z);
+    glUniform3f(pPart.U("u_sunDir"), sun.x, sun.y, sun.z);
+    glUniform1f(pPart.U("u_rain"), rain);
+    glUniform1f(pPart.U("u_flash"), g.flash);
+    glDepthMask(GL_FALSE);
+    glBindVertexArray(vaoPart);
+    glBindBuffer(GL_ARRAY_BUFFER, vboPart);
+    if (!partBuf.empty()) {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBufferData(GL_ARRAY_BUFFER, partBuf.size() * 4, partBuf.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, (int)partBuf.size() / 10);
+    }
+    if (!partAdd.empty()) {
+        glBlendFunc(GL_ONE, GL_ONE);
+        glBufferData(GL_ARRAY_BUFFER, partAdd.size() * 4, partAdd.data(), GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, (int)partAdd.size() / 10);
+    }
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_TRUE);
+}
+
+static void fullscreen(GLuint vao) { glBindVertexArray(vao); glDrawArrays(GL_TRIANGLES, 0, 3); }
 
 void Renderer::draw(Game& g, GLuint target, int outW, int outH) {
     int W = (int)(outW * g.renderScale), H = (int)(outH * g.renderScale);
     resize(W, H);
     float aspect = (float)W / (float)H;
-    M4 proj = perspective(g.camFov * PI / 180.0f, aspect, 0.3f, 3200.0f);
+    M4 proj = perspective(g.camFov * PI / 180.0f, aspect, 0.3f, 4200.0f);
     M4 view = lookAt(g.camPos, g.camLook, V3(0, 1, 0));
     M4 vp = proj * view;
+    bool rain = g.weather == Weather::Rain;
     glDisable(GL_CULL_FACE);
 
-    // 1. reflection
-    glBindFramebuffer(GL_FRAMEBUFFER, refl.fbo);
-    glViewport(0, 0, refl.w, refl.h);
-    glClearColor(0.3f, 0.32f, 0.35f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    M4 vpR = proj * view * scaleM(V3(1, -1, 1));
-    V3 camR(g.camPos.x, -g.camPos.y, g.camPos.z);
-    drawScene(g, vpR, camR, true);
+    if (rain) {
+        glBindFramebuffer(GL_FRAMEBUFFER, refl.fbo);
+        glViewport(0, 0, refl.w, refl.h);
+        glClearColor(0.3f, 0.32f, 0.35f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        M4 vpR = proj * view * scaleM(V3(1, -1, 1));
+        V3 camR(g.camPos.x, -g.camPos.y, g.camPos.z);
+        drawScene(g, vpR, camR, true);
+        glDisable(GL_DEPTH_TEST);
+        glBindFramebuffer(GL_FRAMEBUFFER, reflBlur.fbo);
+        glViewport(0, 0, reflBlur.w, reflBlur.h);
+        pBlurRefl.use();
+        glBindTexture(GL_TEXTURE_2D, refl.tex);
+        glUniform1i(pBlurRefl.U("u_tex"), 0);
+        glUniform2f(pBlurRefl.U("u_texel"), 1.0f / refl.w, 1.0f / refl.h);
+        fullscreen(vaoFull);
+        glEnable(GL_DEPTH_TEST);
+    }
 
-    glDisable(GL_DEPTH_TEST);
-    glBindFramebuffer(GL_FRAMEBUFFER, reflBlur.fbo);
-    glViewport(0, 0, reflBlur.w, reflBlur.h);
-    pBlurRefl.use();
-    glBindTexture(GL_TEXTURE_2D, refl.tex);
-    glUniform1i(pBlurRefl.U("u_tex"), 0);
-    glUniform2f(pBlurRefl.U("u_texel"), 1.0f / refl.w, 1.0f / refl.h);
-    fullscreen(pBlurRefl, vaoFull);
-    glEnable(GL_DEPTH_TEST);
-
-    // 2. main scene (MSAA)
     glBindFramebuffer(GL_FRAMEBUFFER, msFbo);
     glViewport(0, 0, W, H);
+    glClearColor(0.5f, 0.7f, 0.9f, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDepthFunc(GL_LEQUAL);
     drawScene(g, vp, g.camPos, false);
@@ -368,7 +662,6 @@ void Renderer::draw(Game& g, GLuint target, int outW, int outH) {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene.fbo);
     glBlitFramebuffer(0, 0, W, H, 0, 0, W, H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-    // 3. bloom
     glDisable(GL_DEPTH_TEST);
     auto pass = [&](Target& dst, Prog& p, GLuint src) {
         glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo);
@@ -376,9 +669,9 @@ void Renderer::draw(Game& g, GLuint target, int outW, int outH) {
         p.use();
         glBindTexture(GL_TEXTURE_2D, src);
         glUniform1i(p.U("u_tex"), 0);
-        fullscreen(p, vaoFull);
+        fullscreen(vaoFull);
     };
-    pBright.use(); glUniform2f(pBright.U("u_texel"), 1.0f / W, 1.0f / H);
+    pBright.use(); glUniform2f(pBright.U("u_texel"), 1.0f / W, 1.0f / H); glUniform1f(pBright.U("u_thresh"), rain ? 0.62f : 0.80f);
     pass(bloomA, pBright, scene.tex);
     pBlur.use(); glUniform2f(pBlur.U("u_dir"), 1.0f / bloomA.w, 0); pass(bloomB, pBlur, bloomA.tex);
     pBlur.use(); glUniform2f(pBlur.U("u_dir"), 0, 1.0f / bloomA.h); pass(bloomA, pBlur, bloomB.tex);
@@ -386,7 +679,6 @@ void Renderer::draw(Game& g, GLuint target, int outW, int outH) {
     pBlur.use(); glUniform2f(pBlur.U("u_dir"), 1.5f / bloomC.w, 0); pass(bloomD, pBlur, bloomC.tex);
     pBlur.use(); glUniform2f(pBlur.U("u_dir"), 0, 1.5f / bloomC.h); pass(bloomC, pBlur, bloomD.tex);
 
-    // 4. composite
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(0, 0, outW, outH);
     pComposite.use();
@@ -397,185 +689,15 @@ void Renderer::draw(Game& g, GLuint target, int outW, int outH) {
     glUniform1i(pComposite.U("u_scene"), 0);
     glUniform1i(pComposite.U("u_bloomA"), 1);
     glUniform1i(pComposite.U("u_bloomB"), 2);
-    glUniform2f(pComposite.U("u_res"), (float)W, (float)H);
+    glUniform2f(pComposite.U("u_res"), (float)outW, (float)outH);
     glUniform1f(pComposite.U("u_time"), g.globalTime);
     glUniform1f(pComposite.U("u_flashC"), g.flash * 0.5f);
-    fullscreen(pComposite, vaoFull);
+    glUniform1f(pComposite.U("u_bloom"), rain ? 1.0f : 0.45f);
+    glUniform1f(pComposite.U("u_sat"), rain ? 1.10f : 1.16f);
+    float spd = g.cars[g.player].speed();
+    glUniform1f(pComposite.U("u_speedFx"), g.state == State::Title ? 0.0f : clampf((spd - 55.0f) / 30.0f, 0, 1) + (g.cars[g.player].boosting ? 0.6f : 0.0f));
+    fullscreen(vaoFull);
 
-    // 5. HUD
     drawHud(g);
     glEnable(GL_DEPTH_TEST);
-}
-
-// ------------------------------------------------------------- HUD
-static float VH = 1080, VW = 1920;
-
-void Renderer::hudRect(float x, float y, float rw, float rh, V4 c) {
-    HudVtx a = {x, y, 0, 0, c.x, c.y, c.z, c.w, 0}, b = {x + rw, y, 0, 0, c.x, c.y, c.z, c.w, 0};
-    HudVtx cc = {x + rw, y + rh, 0, 0, c.x, c.y, c.z, c.w, 0}, d = {x, y + rh, 0, 0, c.x, c.y, c.z, c.w, 0};
-    hud.insert(hud.end(), {a, b, cc, a, cc, d});
-}
-static void hudQuadUV(std::vector<HudVtx>& hud, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, V4 c, float mode) {
-    HudVtx a = {x0, y0, u0, v0, c.x, c.y, c.z, c.w, mode}, b = {x1, y0, u1, v0, c.x, c.y, c.z, c.w, mode};
-    HudVtx cc = {x1, y1, u1, v1, c.x, c.y, c.z, c.w, mode}, d = {x0, y1, u0, v1, c.x, c.y, c.z, c.w, mode};
-    hud.insert(hud.end(), {a, b, cc, a, cc, d});
-}
-void Renderer::hudLine(float x0, float y0, float x1, float y1, float th, V4 c) {
-    float dx = x1 - x0, dy = y1 - y0, l = sqrtf(dx * dx + dy * dy);
-    if (l < 1e-3f) return;
-    float nx = -dy / l * th * 0.5f, ny = dx / l * th * 0.5f;
-    HudVtx a = {x0 + nx, y0 + ny, 0, 0, c.x, c.y, c.z, c.w, 0}, b = {x1 + nx, y1 + ny, 0, 0, c.x, c.y, c.z, c.w, 0};
-    HudVtx cc = {x1 - nx, y1 - ny, 0, 0, c.x, c.y, c.z, c.w, 0}, d = {x0 - nx, y0 - ny, 0, 0, c.x, c.y, c.z, c.w, 0};
-    hud.insert(hud.end(), {a, b, cc, a, cc, d});
-}
-float Renderer::hudText(const char* s, float x, float y, float size, V4 c, int align, float tracking) {
-    float wdt = (font.measure(s) + tracking * (strlen(s) > 0 ? strlen(s) - 1 : 0)) * size;
-    float x0 = align == 1 ? x - wdt * 0.5f : (align == 2 ? x - wdt : x);
-    font.layout(s, [&](float ax, float ay, float bx, float by, float u0, float v0, float u1, float v1) {
-        hudQuadUV(hud, x0 + ax * size, y - by * size, x0 + bx * size, y - ay * size, u0, v1, u1, v0, c, 1);
-    }, tracking);
-    return wdt;
-}
-
-static void fmtTime(char* buf, size_t n, float t) {
-    if (t < 0) t = 0;
-    int m = (int)(t / 60); float s = t - m * 60;
-    snprintf(buf, n, "%d:%05.2f", m, s);
-}
-
-void Renderer::drawHud(Game& g) {
-    hud.clear();
-    if (g.hideHud) return;
-    VH = 1080; VW = 1080.0f * (float)w / (float)h;
-    const V4 white = {1, 1, 1, 1}, yellow = {1.0f, 0.82f, 0.15f, 1}, panel = {0.02f, 0.03f, 0.05f, 0.55f};
-    const Car& pc = g.cars[g.player];
-    char buf[64];
-    float L = g.track.length;
-
-    if (g.state == State::Title) {
-        float t = g.stateTime;
-        float a = sat(t * 1.5f);
-        hudRect(0, VH * 0.62f, VW, 170, {0, 0, 0, 0.45f * a});
-        hudText("FULL THROTTLE", VW * 0.5f, VH * 0.62f + 105, 110, {1, 1, 1, a}, 1, 0.02f);
-        hudText("RAIN DAY  -  LOOK TEST", VW * 0.5f, VH * 0.62f + 150, 30, {1.0f, 0.82f, 0.15f, a}, 1, 0.12f);
-        float blink = 0.5f + 0.5f * sinf(g.globalTime * 4);
-        hudText("PRESS A TO RACE", VW * 0.5f, VH - 90, 34, {1, 1, 1, a * (0.4f + 0.6f * blink)}, 1, 0.08f);
-    } else {
-        // standings (left)
-        std::vector<int> ord(g.cars.size());
-        for (size_t i = 0; i < g.cars.size(); i++) ord[g.cars[i].place - 1] = (int)i;
-        float x = 28, y = 30;
-        hudRect(x, y, 300, 92, panel);
-        snprintf(buf, sizeof buf, "%d", pc.place);
-        float pw = hudText(buf, x + 18, y + 80, 86, yellow);
-        snprintf(buf, sizeof buf, "/%d", (int)g.cars.size());
-        hudText(buf, x + 24 + pw, y + 78, 40, white);
-        int lap = std::max(1, std::min(g.laps, pc.lap(L)));
-        snprintf(buf, sizeof buf, "LAP %d/%d", lap, g.laps);
-        hudText(buf, x + 282, y + 40, 30, white, 2);
-        fmtTime(buf, sizeof buf, g.raceTime);
-        hudText(buf, x + 282, y + 78, 26, {0.8f, 0.85f, 0.9f, 1}, 2);
-        y += 104;
-        for (size_t i = 0; i < ord.size(); i++) {
-            const Car& c = g.cars[ord[i]];
-            bool me = ord[i] == g.player;
-            hudRect(x, y, 230, 34, me ? V4{1.0f, 0.82f, 0.15f, 0.85f} : V4{0.02f, 0.03f, 0.05f, 0.5f});
-            V4 tc = me ? V4{0.05f, 0.05f, 0.05f, 1} : white;
-            snprintf(buf, sizeof buf, "%d", (int)i + 1);
-            hudText(buf, x + 30, y + 26, 24, tc, 2);
-            hudRect(x + 40, y + 6, 8, 22, {c.liv.c1.x, c.liv.c1.y, c.liv.c1.z, 1});
-            hudRect(x + 48, y + 6, 4, 22, {c.liv.c2.x, c.liv.c2.y, c.liv.c2.z, 1});
-            hudText(c.liv.tag.c_str(), x + 62, y + 26, 24, tc);
-            if (i > 0 && !me) {
-                const Car& lead = g.cars[ord[0]];
-                float gap = (lead.dist - c.dist) / fmaxf(20.0f, lead.speed());
-                snprintf(buf, sizeof buf, "+%.1f", gap);
-                hudText(buf, x + 220, y + 25, 20, {0.75f, 0.8f, 0.85f, 1}, 2);
-            }
-            y += 38;
-        }
-
-        // minimap (bottom-left)
-        {
-            float mx = 28, my = VH - 250, mw = 230, mh = 220;
-            hudRect(mx, my, mw, mh, panel);
-            V2 mn = g.rnd->geo.mapMin, mxp = g.rnd->geo.mapMax;
-            float sc = fminf((mw - 40) / (mxp.x - mn.x), (mh - 40) / (mxp.y - mn.y));
-            float ox = mx + mw * 0.5f - (mn.x + mxp.x) * 0.5f * sc, oy = my + mh * 0.5f + (mn.y + mxp.y) * 0.5f * sc;
-            auto& mm = g.rnd->geo.minimap;
-            for (size_t i = 0; i < mm.size(); i++) {
-                V2 a = mm[i], b = mm[(i + 1) % mm.size()];
-                hudLine(ox + a.x * sc, oy - a.y * sc, ox + b.x * sc, oy - b.y * sc, 7, {0.85f, 0.88f, 0.92f, 0.9f});
-            }
-            for (size_t i = 0; i < g.cars.size(); i++) {
-                const Car& c = g.cars[i];
-                float px = ox + c.pos.x * sc, py = oy - c.pos.z * sc;
-                float r = (int)i == g.player ? 9.0f : 6.5f;
-                V4 col = (int)i == g.player ? yellow : V4{c.liv.c1.x, c.liv.c1.y, c.liv.c1.z, 1};
-                hudQuadUV(hud, px - r - 2, py - r - 2, px + r + 2, py + r + 2, 0, 0, 1, 1, {0, 0, 0, 0.8f}, 2);
-                hudQuadUV(hud, px - r, py - r, px + r, py + r, 0, 0, 1, 1, col, 2);
-            }
-        }
-
-        // speed + boost (bottom-right)
-        {
-            float mph = pc.speed() * 2.23694f;
-            float bx = VW - 330, by = VH - 170;
-            hudRect(bx, by, 300, 140, panel);
-            snprintf(buf, sizeof buf, "%d", (int)(mph + 0.5f));
-            hudText(buf, bx + 210, by + 92, 84, white, 2);
-            hudText("MPH", bx + 218, by + 90, 28, {0.8f, 0.85f, 0.9f, 1});
-            int segs = 14;
-            float sw = 262.0f / segs;
-            for (int i = 0; i < segs; i++) {
-                float f = (i + 0.5f) / segs;
-                bool on = f <= pc.boost;
-                V4 c = on ? (f < 0.5f ? V4{0.2f, 0.9f, 0.35f, 1} : (f < 0.8f ? V4{0.95f, 0.85f, 0.15f, 1} : V4{1.0f, 0.35f, 0.15f, 1}))
-                          : V4{1, 1, 1, 0.15f};
-                if (pc.boosting && on) c = {0.35f, 0.85f, 1.0f, 1};
-                hudRect(bx + 19 + i * sw, by + 108, sw - 4, 16, c);
-            }
-            hudText("BOOST", bx + 19, by + 102, 18, {0.8f, 0.85f, 0.9f, 1}, 0, 0.1f);
-        }
-
-        // centre messages
-        if (g.state == State::Countdown) {
-            int n = 3 - (int)g.stateTime;
-            float f = g.stateTime - (int)g.stateTime;
-            snprintf(buf, sizeof buf, "%d", n);
-            float s = 220 * (1.25f - 0.25f * f);
-            hudText(buf, VW * 0.5f, VH * 0.42f + s * 0.35f, s, {1, 0.82f, 0.15f, 1 - f * 0.6f}, 1);
-        }
-        if (g.bannerTime > 0 && !g.banner.empty()) {
-            float a = sat(g.bannerTime * 2);
-            hudText(g.banner.c_str(), VW * 0.5f, VH * 0.36f, 110, {1, 0.82f, 0.15f, a}, 1, 0.03f);
-        }
-        if (g.state == State::Finished && g.stateTime > 1.5f) {
-            float a = sat((g.stateTime - 1.5f) * 2);
-            hudRect(VW * 0.5f - 330, VH * 0.5f - 60, 660, 210, {0, 0, 0, 0.6f * a});
-            snprintf(buf, sizeof buf, "YOU FINISHED P%d", pc.place);
-            hudText(buf, VW * 0.5f, VH * 0.5f + 30, 64, {1, 0.82f, 0.15f, a}, 1);
-            fmtTime(buf, sizeof buf, pc.finishTime);
-            hudText(buf, VW * 0.5f, VH * 0.5f + 80, 34, {1, 1, 1, a}, 1);
-            hudText("PRESS A TO RACE AGAIN", VW * 0.5f, VH * 0.5f + 125, 26, {1, 1, 1, a * 0.8f}, 1, 0.08f);
-        }
-        if (g.state == State::Paused) {
-            hudRect(0, 0, VW, VH, {0, 0, 0, 0.5f});
-            hudText("PAUSED", VW * 0.5f, VH * 0.45f, 110, white, 1);
-            hudText("START: RESUME     SELECT: RESTART", VW * 0.5f, VH * 0.45f + 70, 30, {1, 1, 1, 0.8f}, 1, 0.05f);
-        }
-    }
-
-    if (hud.empty()) return;
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    pHud.use();
-    glUniform2f(pHud.U("u_size"), VW, VH);
-    glUniform1i(pHud.U("u_font"), 0);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, fontTex);
-    glBindVertexArray(vaoHud);
-    glBindBuffer(GL_ARRAY_BUFFER, vboHud);
-    glBufferData(GL_ARRAY_BUFFER, hud.size() * sizeof(HudVtx), hud.data(), GL_STREAM_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, (int)hud.size());
-    glDisable(GL_BLEND);
 }
